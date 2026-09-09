@@ -24,8 +24,9 @@ jobs:
     env:
       HF_HUB_OFFLINE: '1'
       QT_QPA_PLATFORM: offscreen
-      ICOURSE_STATE_DIR: ${{ runner.temp }}/icourse-state
     steps:
+      - name: Use temporary application state
+        run: echo "ICOURSE_STATE_DIR=$RUNNER_TEMP/icourse-state" >> "$GITHUB_ENV"
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d # v10.0.1
         with:
