@@ -1,0 +1,60 @@
+name: Mac and core checks
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: checks-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-14, macos-26, ubuntu-24.04]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 35
+    env:
+      HF_HUB_OFFLINE: '1'
+      QT_QPA_PLATFORM: offscreen
+      ICOURSE_STATE_DIR: ${{ runner.temp }}/icourse-state
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d # v10.0.1
+        with:
+          version: '0.11.26'
+          enable-cache: true
+      - name: Install media tools (Mac)
+        if: runner.os == 'macOS'
+        run: command -v ffmpeg && command -v ffprobe || brew install ffmpeg
+      - name: Install media tools (Linux)
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y ffmpeg
+      - name: Install locked dependencies (Mac)
+        if: runner.os == 'macOS'
+        run: uv sync --locked --extra mac --extra cpu --python 3.13 --managed-python
+      - name: Install locked dependencies (Linux)
+        if: runner.os == 'Linux'
+        run: uv sync --locked --extra cpu --python 3.13 --managed-python
+      - name: Offline tests and lint
+        run: |
+          .venv/bin/pytest -q
+          .venv/bin/ruff check --select F src tools scripts main.py tests
+          .venv/bin/python -m src.cli doctor
+      - name: Audit runtime wheel
+        run: |
+          uv build --wheel --out-dir build/wheels
+          .venv/bin/python -c 'from pathlib import Path; from scripts.install_mac_runtime import validate_wheel; [validate_wheel(p) for p in Path("build/wheels").glob("*.whl")]'
+      - name: Install and smoke test desktop runtime (Mac)
+        if: runner.os == 'macOS'
+        run: |
+          .venv/bin/python scripts/install_mac_runtime.py --support-dir "$RUNNER_TEMP/icourse-support" --applications-dir "$RUNNER_TEMP/Applications"
+          "$RUNNER_TEMP/icourse-support/runtime/bin/python" -I -m src.cli doctor
+          "$RUNNER_TEMP/icourse-support/runtime/bin/python" -I -c 'from PySide6.QtWidgets import QApplication; from src.mac_gui import MainWindow; from src.preferences import defaults; app = QApplication([]); window = MainWindow(initial_values=defaults()); assert window.mode.count() == 4; window.close()'

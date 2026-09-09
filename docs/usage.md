@@ -1,0 +1,145 @@
+# 使用说明
+
+## 桌面任务
+
+| 本次任务 | 用途 | 需要学校账号 | 需要笔记 API |
+|---|---|---|---|
+| 下载并生成笔记 | 下载回放、本地转录、生成笔记 | 是 | 是 |
+| 只下载课程 | 保存回放 | 是 | 否 |
+| 为本地课程生成笔记 | 处理之前下载到课程目录的录像或已有转录 | 否 | 是 |
+| 转录一个本地文件 | 将选择的音视频转成 TXT、SRT | 否 | 否 |
+
+“本地音视频”只用于“转录一个本地文件”。其余模式通过课程 ID 和课程目录找到资料。单文件转录目前不自动调用笔记 API。
+
+### 课程 ID 和课次 ID
+
+先在 [iCourse 网页](https://icourse.fudan.edu.cn)打开自己有权访问的课程，查看课程页面地址中的课程编号。网页课程和课程中的单节回放各有自己的编号，不能混填。
+
+- “课程 ID”：一个课程或多个课程，使用英文逗号，例如 `12345,23456`。
+- “指定课次”：单节回放的编号，例如 `123456`；留空表示处理所选课程的全部可用回放。
+- “排除时段”：可留空。例 `12345:星期一早上,evening`，排除这门课相应时段。
+
+第一次先处理一个课次。后续再次启动同一任务，会复用已经完成并验证的产物。网页尚未发布回放时会记录“暂无”，下次运行再检查。
+
+### 保存与重新生成
+
+修改任一页的设置后，到“设置”页点击“保存设置”，才会保留到下次启动。开始任务会使用当前界面中的值。
+
+平时不要勾选重新生成。需要重新写笔记时：
+
+1. 选择“为本地课程生成笔记”，填原课程 ID；只改一节课时同时填课次 ID。
+2. 课程保存位置、笔记保存位置指向之前的目录。
+3. 勾选“只重新生成笔记（复用已有转录）”。
+4. 点击开始。成功后取消勾选，避免下次又重做。
+
+此选项不下载、不重新转录；没有完整转录时会报错。若需要同时重新识别音频，改选“重新生成已有转录和笔记”；两项互斥。该选项仍复用已存在的 MP4。
+
+### 笔记生成规则
+
+语音识别在本地按短音频块运行，减少内存占用。识别结果合并为整课原文后，笔记模型只收到一次完整请求。这两种“分段”不是同一个阶段。
+
+正常成功路径：完整原文 → 一次模型请求 → 一份 Markdown 笔记。没有提纲、逐章写作、AI 核对或自动修订轮次。标题与段落由模型正常排版。
+
+默认单次输出上限为 65536 tokens、请求等待上限为 20 分钟。输出上限是允许生成的预算，不是目标字数；实际消耗以服务商记录为准。模型需同时容纳完整输入和预留输出。
+
+- 服务临时故障或空正文：有限重试，等待 5 秒、15 秒，每个模型最多 3 次尝试；配置了备用模型时可能继续尝试备用模型。
+- 输出达到长度上限或异常结束：报错，不保存半篇正式笔记；不会自动拆分成更多请求。
+- 最后保存文件失败：完整响应已写入隐藏缓存时，相同输入和配置重试可直接保存，避免重复付费。
+- 重新生成成功：同名旧笔记存入隐藏历史目录，当前正式笔记仍只有一份。
+
+## 文件结构
+
+假设课程保存位置是 `/Volumes/CourseDisk/iCourse`，笔记保存位置是 `~/Documents/Study/courses`：
+
+```text
+/Volumes/CourseDisk/iCourse/
+└── 12345-课程名称/
+    └── 录屏/
+        ├── 课次标题_123456.mp4
+        ├── 课次标题_123456.srt
+        └── .icourse/                  # 内部校验资料
+
+~/Documents/Study/courses/
+└── 12345-课程名称/
+    ├── 笔记/
+    │   ├── 课次标题_123456.md          # 阅读这一份笔记
+    │   └── .icourse/                  # 缓存与历史
+    └── 原始txt/
+        ├── 课次标题_123456.txt
+        └── .icourse/                  # 转录时间轴等
+```
+
+目录名以实际程序输出为准。只下载模式不生成字幕；字幕在转录后产生。单文件转录直接在指定输出目录生成 TXT、SRT，内部时间轴和校验记录也在隐藏 `.icourse` 中。
+
+Finder 默认不显示 `.icourse`。按 **Command+Shift+.** 可切换隐藏文件。内部 JSON 用于校验与恢复，不要为“清理参数”而批量删除。
+
+## 命令行
+
+以下在源码目录运行，且已执行安装器。命令行与 App 共用同一套转录、流水线和整课总结代码；源码修改后要重新安装才能更新 App。
+
+```sh
+# 本机环境检查，不登录、不调用笔记 API
+.venv/bin/python -m src.cli doctor
+
+# 下载并加载转录模型，不生成笔记
+.venv/bin/python -m src.cli prepare-model
+
+# 转录自己的单个本地文件
+.venv/bin/python -m src.cli transcribe /path/to/lecture.mp4 --output-dir /path/to/results
+
+# 指定 CPU 备用后端
+.venv/bin/python -m src.cli transcribe /path/to/lecture.mp4 --backend cpu
+```
+
+课程流水线使用环境变量或 `.env`；它不会自动读取 GUI 钥匙串设置。先创建自己的配置文件：
+
+```sh
+cp .env.example .env
+chmod 600 .env
+```
+
+用文本编辑器修改 `.env`，填自己的账号和 API Key。不要将 `.env` 上传或分享；外部已经导出的同名环境变量优先于 `.env`。
+
+```sh
+# 仅查询可用回放，会登录学校
+.venv/bin/python -m src.cli run --env-file .env --mode download --course-ids 12345 --list-only
+
+# 下载并生成笔记；路径中的磁盘名替换成自己的
+.venv/bin/python -m src.cli run --env-file .env \
+  --mode download_and_summarize --course-ids 12345 --sub-ids 123456 \
+  --out-dir /Volumes/CourseDisk/iCourse --summary-dir "$HOME/Documents/Study/courses"
+
+# 复用本地转录，仅重写笔记
+.venv/bin/python -m src.cli run --env-file .env \
+  --mode summarize --course-ids 12345 --sub-ids 123456 --redo-notes \
+  --out-dir /Volumes/CourseDisk/iCourse --summary-dir "$HOME/Documents/Study/courses"
+
+# 查看全部参数
+.venv/bin/python -m src.cli run --help
+```
+
+### 常用环境变量
+
+| 变量 | 用途 |
+|---|---|
+| `StuId`、`UISPsw` | 学号、UIS 密码，注意大小写 |
+| `COURSE_IDS` | 英文逗号分隔的课程 ID |
+| `DOWNLOAD_DIR`、`SUMMARY_DIR` | 视频和文字的两个根目录 |
+| `LLM_NAME_1`、`LLM_BASE_URL_1`、`LLM_MODELS_1`、`LLM_API_KEY_1` | 模型服务名称、基础地址、模型 ID、密钥 |
+| `LLM_API_STYLE_1` | 可选 `openai` 或 `anthropic`，通常自动识别 |
+| `LLM_MAX_OUTPUT_TOKENS` | 单次输出预算，默认 65536 |
+| `API_TIMEOUT_MS` | 单次请求等待上限，毫秒；默认 1200000 |
+| `ASR_BACKEND` | `auto`、`mlx`、`cpu`、`cuda`；Mac auto 使用 MLX |
+| `WHISPER_MODEL` | 默认 `large-v3-turbo`，MLX 对应社区转换模型 |
+| `WHISPER_LANGUAGE` | 默认 `zh`，留空自动检测 |
+| `ASR_CHUNK_SECONDS` | 本地音频块长度，默认 300 秒，范围 30–1800 |
+| `ASR_OVERLAP_SECONDS` | 音频相邻块重叠时间，默认 2 秒 |
+| `ASR_MODEL_REVISION` | 自定义模型的固定修订号；默认模型已固定版本 |
+| `HF_HUB_OFFLINE=1` | 模型已缓存时禁止在线下载 |
+| `FFMPEG_DIR` | 自定义 ffmpeg/ffprobe 的目录 |
+
+旧变量 `LLM_INPUT_CHAR_LIMIT` 已停用；笔记输入不再按字符切块。`WHISPER_BEAM_SIZE` 和 `WHISPER_VAD_FILTER` 仅影响 CPU/CUDA 转录，不传给 MLX。
+
+退出码：`0` 为没有失败任务，`1` 为处理失败，`2` 为已有另一条课程流水线正在运行。已完成目标会复用；取消后重跑会检查产物。当前不支持转录中的块级断点续转。
+
+桌面版不会自动发送邮件。`main.py`、数据库和邮件脚本保留作旧接口兼容用途，不属于这里的标准使用流程。

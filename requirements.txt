@@ -1,11 +1,2 @@
-requests
-pycryptodome
-sherpa-onnx
-numpy
-openai
-pillow
-markdown
-psutil
-pygments
-rapidocr-onnxruntime
-imagehash
+# Compatibility installation. Prefer uv sync --locked for reproducibility.
+-e .[mac,cpu]

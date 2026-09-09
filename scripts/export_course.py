@@ -4,13 +4,9 @@ Usage:
     python scripts/export_course.py --course-id 30004
     python scripts/export_course.py --course-id 30004,30005
     python scripts/export_course.py --course-id 30004,30005 --pdf
-    python scripts/export_course.py --course-id 30004 --sub-ids 1,2,5
 
 Options:
     --course-id   Comma-separated course IDs to export (required).
-    --sub-ids     Optional comma-separated lecture sub_ids.  When set, only
-                  lectures with matching sub_id are exported.  Used by the
-                  frontend "导出" dialog to honour per-lecture selection.
     --pdf         Convert summaries to PDF and send as attachment.
                   Without this flag the summaries are sent as HTML emails.
     --db          Database path (default: data/icourse.db).
@@ -36,9 +32,9 @@ from html import escape
 # Allow importing from the project root when run as `python scripts/export_course.py`
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from src.runtime import config
-from src.data.database import Database  # noqa: E402
-from src.api.emailer import _EMAIL_CSS, _PYGMENTS_CSS, _md_to_html  # noqa: E402
+from src import config  # noqa: E402
+from src.database import Database  # noqa: E402
+from src.emailer import _EMAIL_CSS, _PYGMENTS_CSS, _md_to_html  # noqa: E402
 
 # Override hardcoded pixel dimensions for PDF rendering.
 # WeasyPrint maps CSS px to physical size at 96 DPI, which makes the
@@ -87,14 +83,14 @@ def _build_html(course_title: str, teacher: str, lectures: list[dict],
 def _build_plain(course_title: str, teacher: str, lectures: list[dict]) -> str:
     """Build a plain-text version of the summaries."""
     parts = [
-        f"# 课程：{course_title}",
+        f"课程：{course_title}",
         f"任课教师：{teacher}",
-        # "=" * 40,
+        "=" * 40,
     ]
     for lec in lectures:
-        # parts.append(f"\n{'─' * 40}")
-        parts.append(f"## {lec['sub_title']} ({lec['date']})")
-        # parts.append("─" * 40)
+        parts.append(f"\n{'─' * 40}")
+        parts.append(f"{lec['sub_title']} ({lec['date']})")
+        parts.append("─" * 40)
         parts.append(lec["summary"])
     return "\n".join(parts)
 
@@ -158,43 +154,16 @@ def _send_pdf_email(subject: str,
     with _smtp_connect() as server:
         server.sendmail(config.SMTP_EMAIL, config.RECEIVER_EMAIL, msg.as_string())
 
-def _send_md_email(subject: str, md_content: list[tuple[bytes, str]]) -> None:
-    """Send an email with Markdown content.
-
-    Args:
-        md_content: List of ``(md_bytes, filename)`` tuples.
-    """
-    msg = MIMEMultipart()
-    msg["Subject"] = subject
-    msg["From"] = formataddr(("iCourse Subscriber", config.SMTP_EMAIL))
-    msg["To"] = config.RECEIVER_EMAIL
-
-    for md_bytes, filename in md_content:
-        part = MIMEBase("text", "markdown", name=filename)
-        part.set_payload(md_bytes)
-        encoders.encode_base64(part)
-        part.add_header("Content-Disposition", "attachment", filename=filename)
-        msg.attach(part)
-
-    with _smtp_connect() as server:
-        server.sendmail(config.SMTP_EMAIL, config.RECEIVER_EMAIL, msg.as_string())
 
 def _safe_filename(title: str) -> str:
     """Sanitise a course title for use as a filename."""
     return "".join(c if c.isalnum() or c in " _-" else "_" for c in title)
 
 
-def _query_course(db: Database, course_id: str,
-                  sub_ids: list[str] | None = None) -> tuple[str, str, list[dict]] | None:
+def _query_course(db: Database, course_id: str) -> tuple[str, str, list[dict]] | None:
     """Return ``(course_title, teacher, lectures)`` for *course_id*.
 
     Returns ``None`` if the course is missing or has no summaries.
-
-    Args:
-        sub_ids: When provided, restrict the result to lectures whose
-                 ``sub_id`` is in the list.  String comparison — pass the
-                 same form the database stores (the schema treats sub_id
-                 as TEXT/INTEGER interchangeably).
     """
     course = db.conn.execute(
         "SELECT * FROM courses WHERE course_id = ?", (course_id,)
@@ -215,10 +184,6 @@ def _query_course(db: Database, course_id: str,
     ).fetchall()
     lectures = [dict(row) for row in rows]
 
-    if sub_ids:
-        wanted = {str(s) for s in sub_ids}
-        lectures = [lec for lec in lectures if str(lec["sub_id"]) in wanted]
-
     if not lectures:
         print(f"No summaries found for course {course_id} ({course_title}) – skipping.")
         return None
@@ -234,20 +199,9 @@ def main():
         help="Comma-separated course IDs to export (e.g. 30004 or 30004,30005)",
     )
     parser.add_argument(
-        "--sub-ids", default="",
-        help="Optional comma-separated sub_ids; when set, only those "
-             "lectures are exported (used by the frontend's per-lecture "
-             "selection in the export dialog)",
-    )
-    parser.add_argument(
         "--pdf",
         action="store_true",
         help="Export as PDF attachment instead of inline HTML email",
-    )
-    parser.add_argument(
-        "--md",
-        action="store_true",
-        help="Export as Markdown attachment instead of HTML email (experimental)",
     )
     parser.add_argument(
         "--db", default="data/icourse.db",
@@ -267,11 +221,6 @@ def main():
         print("No valid course IDs provided.")
         sys.exit(1)
 
-    # Parse optional sub_ids filter
-    sub_ids = [s.strip() for s in args.sub_ids.split(",") if s.strip()] or None
-    if sub_ids:
-        print(f"Filtering to {len(sub_ids)} sub_id(s): {', '.join(sub_ids)}")
-
     if not config.SMTP_EMAIL or not config.SMTP_PASSWORD or not config.RECEIVER_EMAIL:
         print("Email configuration incomplete. Set SMTP_EMAIL, SMTP_PASSWORD, RECEIVER_EMAIL.")
         sys.exit(1)
@@ -287,7 +236,7 @@ def main():
         attachments: list[tuple[bytes, str]] = []
         titles: list[str] = []
         for cid in course_ids:
-            result = _query_course(db, cid, sub_ids=sub_ids)
+            result = _query_course(db, cid)
             if result is None:
                 continue
             course_title, teacher, lectures = result
@@ -310,38 +259,11 @@ def main():
         _send_pdf_email(subject, attachments)
         print(f"[OK] Sent: {subject}")
 
-    elif args.md:
-        # Markdown mode: one MD file per course, all files in one email
-        attachments: list[tuple[bytes, str]] = []
-        titles: list[str] = []
-        for cid in course_ids:
-            result = _query_course(db, cid, sub_ids=sub_ids)
-            if result is None:
-                continue
-            course_title, teacher, lectures = result
-            titles.append(course_title)
-
-            markdown:str = _build_plain(course_title, teacher, lectures)
-            markdown_bytes = markdown.encode("utf-8")
-            filename = f"{_safe_filename(course_title)}_summaries.md"
-            attachments.append((markdown_bytes, filename))
-            print(f"  Markdown ready ({len(markdown_bytes)} bytes): {filename}")
-
-        if not attachments:
-            print("No courses with summaries found – nothing to send.")
-            sys.exit(0)
-
-        subject = "[iCourse 课程摘要导出] " + ", ".join(titles)
-        total_bytes = sum(len(b) for b, _ in attachments)
-        print(f"Sending email with {len(attachments)} MD(s) ({total_bytes} bytes)...")
-        _send_md_email(subject, attachments)
-        print(f"[OK] Sent: {subject}")
-
     else:
         # Email mode: one CID-embedded HTML email per course
         sent = 0
         for cid in course_ids:
-            result = _query_course(db, cid, sub_ids=sub_ids)
+            result = _query_course(db, cid)
             if result is None:
                 continue
             course_title, teacher, lectures = result
