@@ -1,5 +1,6 @@
 import json
 from types import SimpleNamespace
+from uuid import uuid4
 
 import pytest
 
@@ -22,10 +23,14 @@ class MemoryKeyring:
 def test_secrets_never_written_to_preferences(tmp_path):
     path = tmp_path / "settings.json"
     store = Preferences(path, MemoryKeyring())
-    values = {**defaults(), "uis_psw": "secret password", "llm_api_key_1": "secret api key"}
+    # Synthetic values exist only during this test; no real account is contacted.
+    fake_password = uuid4().hex
+    fake_api_key = uuid4().hex
+    values = defaults()
+    values.update(uis_psw=fake_password, llm_api_key_1=fake_api_key)
     store.save(values)
     text = path.read_text()
-    assert "secret password" not in text and "secret api key" not in text
+    assert fake_password not in text and fake_api_key not in text
     assert all(field not in json.loads(text) for field in SECRET_FIELDS)
     assert store.load()["uis_psw"] == values["uis_psw"]
     assert path.stat().st_mode & 0o777 == 0o600
