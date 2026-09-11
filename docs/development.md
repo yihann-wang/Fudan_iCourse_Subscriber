@@ -29,6 +29,7 @@ GitHub Actions 在 macOS 14、macOS 26 和 Linux 上检查锁定依赖、代码�
 | `src/summarizer.py` | 整课单次请求、重试与完整响应验证 |
 | `src/artifacts.py`、`src/summary_storage.py` | 校验、隐藏状态、原子写入与历史 |
 | `scripts/install_mac_runtime.py`、`scripts/create_mac_app.py` | 独立运行环境与本机启动器 |
+| `scripts/macos_launcher.m`、`src/mac_app_check.py` | 原生 App 入口与不读取真实设置的启动自检 |
 | `tests/` | 不使用真实账号的回归测试 |
 | `main.py`、数据库/邮件相关模块与 `tools/` | 保留的旧接口；新入口优先使用 `src.cli` |
 
@@ -42,6 +43,8 @@ GitHub Actions 在 macOS 14、macOS 26 和 Linux 上检查锁定依赖、代码�
 - 更新失败不能覆盖已完成的正式笔记；内部信息放入隐藏 `.icourse`。
 - GUI 保存的密码、API Key 不能进入 JSON，也不能在钥匙串失败时回退明文。
 - App 必须使用已安装的运行环境，不依赖源码目录或启动时的 Python 搜索路径。
+
+原生入口通过 `dlopen` 加载安装环境的 Python 动态库，在同一进程调用 `Py_BytesMain`，使用 `-I` 隔离 Python 搜索路径，并保留运行环境的 `sys.executable` 供后台引擎使用。不要将入口改回 shell 脚本或 `exec` 替换为解释器，否则会丢失原生主程序身份。GUI 和后台分别检查目录；没有启用 App Sandbox，也不修改 TCC 数据库。这里的本地 ad-hoc 签名只用于运行，不等于跨版本稳定的 Developer ID 身份。[Apple DTS 背景说明](https://developer.apple.com/forums/thread/678819)。
 
 ## 构建与安装检查
 
@@ -59,7 +62,12 @@ validation_dir="$(mktemp -d)"
 ICOURSE_STATE_DIR="$validation_dir/state" .venv/bin/python scripts/install_mac_runtime.py \
   --support-dir "$validation_dir/support" --applications-dir "$validation_dir/Applications"
 "$validation_dir/support/runtime/bin/python" -I -m src.cli doctor
+QT_QPA_PLATFORM=offscreen "$validation_dir/Applications/iCourse.app/Contents/MacOS/iCourse" --self-test
+QT_QPA_PLATFORM=offscreen "$validation_dir/Applications/iCourse.app/Contents/MacOS/iCourse" --self-test
+codesign --verify --strict "$validation_dir/Applications/iCourse.app"
 ```
+
+`--self-test` 只创建使用默认值的 Qt 窗口对象、检查后台 Python 和 App 身份，不读取个人设置、钥匙串或课程，不发起网络请求。它不能模拟用户在 Finder 启动后给予的真实 TCC 授权。验证授权保留时，应在干净的 macOS 用户环境中打开已安装 App，授权 Documents/外置卷，正常退出后再次打开，确认无需重新选目录；不要用 Terminal 的既有授权冒充 App 授权。
 
 普通用户更新仍运行根目录的安装器。`.app` 中含绝对运行环境路径，只供安装它的用户和电脑使用；发布时使用 Git 跟踪的源码，不发布本机 `.app`、虚拟环境或模型缓存。
 

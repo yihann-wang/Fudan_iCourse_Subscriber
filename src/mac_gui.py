@@ -31,7 +31,8 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from .preferences import SECRET_FIELDS, Preferences, runtime_environment
+from .preferences import SECRET_FIELDS, Preferences, defaults, runtime_environment
+from .storage_access import StorageAccessError, check_directory, check_pipeline_storage
 from .summary_settings import DEFAULT_OUTPUT_TOKENS, DEFAULT_TIMEOUT_MINUTES
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -261,8 +262,23 @@ class MainWindow(QMainWindow):
             return
         try:
             values = self.collect()
+            if action == "task":
+                for name in ("out_dir", "summary_dir"):
+                    path = Path(values[name] or defaults()[name]).expanduser()
+                    values[name] = str((path if path.is_absolute() else ROOT / path).resolve())
             args = self.command(action, values)
             env = runtime_environment(values)
+            if action == "task":
+                # Request access in the native GUI process. The supervised worker
+                # repeats these checks before login or model work.
+                if values["mode"] == "local_asr":
+                    check_directory(Path(values["summary_dir"]), "转录保存位置", writable=True, create=True)
+                else:
+                    check_pipeline_storage(Path(values["out_dir"]), Path(values["summary_dir"]),
+                                           mode=values["mode"], list_only=False)
+        except StorageAccessError as exc:
+            QMessageBox.warning(self, "保存位置无法访问", str(exc))
+            return
         except ValueError as exc:
             QMessageBox.information(self, "还需要填写", str(exc))
             return

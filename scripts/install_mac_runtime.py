@@ -14,9 +14,9 @@ from platformdirs import user_data_path
 
 # Works both as a script and when imported by offline installer tests.
 if __package__:
-    from .create_mac_app import create_app, validate_destination
+    from .create_mac_app import compile_launcher, create_app, validate_destination
 else:
-    from create_mac_app import create_app, validate_destination
+    from create_mac_app import compile_launcher, create_app, validate_destination
 
 
 def validate_wheel(wheel: Path) -> None:
@@ -56,6 +56,8 @@ def install(root: Path, support: Path, applications: Path) -> Path:
             raise RuntimeError("没有找到唯一的安装包。")
         wheel = wheels[0]
         validate_wheel(wheel)
+        launcher = Path(build) / "iCourse"
+        compile_launcher(root, launcher)
         requirements = Path(build) / "requirements.txt"
         run([uv, "export", "--locked", "--extra", "mac", "--extra", "cpu", "--no-dev",
              "--no-emit-project", "--format", "requirements-txt", "--output-file", str(requirements), "--quiet"])
@@ -67,7 +69,7 @@ def install(root: Path, support: Path, applications: Path) -> Path:
         run([uv, "pip", "install", "--python", str(python), "--no-deps", "--reinstall", str(wheel)])
         run([str(python), "-I", "-c", "import src.mac_gui, src.pipeline, src.summarizer"])
         shutil.copy2(requirements, support / "runtime-requirements.txt")
-    return create_app(root, python, applications)
+        return create_app(root, python, applications, launcher=launcher)
 
 
 def main():

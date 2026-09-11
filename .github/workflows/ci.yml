@@ -59,3 +59,6 @@ jobs:
           .venv/bin/python scripts/install_mac_runtime.py --support-dir "$RUNNER_TEMP/icourse-support" --applications-dir "$RUNNER_TEMP/Applications"
           "$RUNNER_TEMP/icourse-support/runtime/bin/python" -I -m src.cli doctor
           "$RUNNER_TEMP/icourse-support/runtime/bin/python" -I -c 'from PySide6.QtWidgets import QApplication; from src.mac_gui import MainWindow; from src.preferences import defaults; app = QApplication([]); window = MainWindow(initial_values=defaults()); assert window.mode.count() == 4; window.close()'
+          "$RUNNER_TEMP/Applications/iCourse.app/Contents/MacOS/iCourse" --self-test
+          "$RUNNER_TEMP/Applications/iCourse.app/Contents/MacOS/iCourse" --self-test
+          codesign --verify --strict "$RUNNER_TEMP/Applications/iCourse.app"

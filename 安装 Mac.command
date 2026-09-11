@@ -15,6 +15,10 @@ if ! command -v uv >/dev/null || ! command -v ffmpeg >/dev/null || ! command -v 
   print "需要 uv、ffmpeg 和 ffprobe。安装 Homebrew 后运行：brew install uv ffmpeg"
   exit 1
 fi
+if ! xcrun --find clang >/dev/null 2>&1; then
+  print "需要 Apple Command Line Tools 来构建 App。请先执行 xcode-select --install，安装完成后重试。"
+  exit 1
+fi
 print "安装 iCourse。请先关闭正在运行的 iCourse 任务和窗口。"
 # A managed interpreter survives Homebrew Python upgrades and moving this checkout.
 uv python install 3.13
