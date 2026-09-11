@@ -11,6 +11,7 @@ from pathlib import Path
 
 from .artifacts import atomic_write_json, atomic_write_text, file_sha256, migrate_auxiliary
 from .asr import ASRSettings
+from .storage_access import check_directory
 
 
 def doctor():
@@ -100,6 +101,7 @@ def main(argv=None):
         from .transcriber import Transcriber
         media = args.media.expanduser().resolve(strict=True)
         output = (args.output_dir or media.parent / "转录结果").expanduser().resolve()
+        check_directory(output, "转录保存位置", writable=True, create=True)
         identity = file_sha256(media)
         stem = f"{media.stem}_{identity[:12]}"
         metadata_path = migrate_auxiliary(output / (stem + ".json"))

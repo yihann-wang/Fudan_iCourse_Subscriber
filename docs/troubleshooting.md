@@ -16,12 +16,16 @@
 
 典型错误：`PermissionError: Operation not permitted: '/Volumes/…'`。这通常与 macOS 隐私权限有关，也可能是磁盘挂载、文件夹权限或连接问题。
 
-1. 先在 Finder 确认磁盘存在，并能在目标目录新建一个普通文件夹。
+1. 先在 Finder 确认磁盘或 Documents 中的目录存在，并能在目标目录新建一个普通文件夹。
 2. 在 App 中点保存位置右侧“选择…”，重新选择目标文件夹。若系统询问访问权限，选择 **Allow**。
 3. 打开 **System Settings → Privacy & Security → Files & Folders**。找到实际运行的 iCourse 条目并展开；若有 **Removable Volumes** 或 **Documents Folder**，开启对应权限。
 4. 退出并重开 App，重试一个课次。命令行运行时，系统可能把访问权限归到 **Terminal**，应检查实际启动方式对应的条目。
 
 没有出现 Allow 或 iCourse 条目时，不代表权限已经授予。先确认用的是 `~/Applications/iCourse.app`，完成安装后重新选择目录；可暂时选择用户文件夹下新建的 `~/iCourse` 目录来区分程序问题和受保护目录问题。
+
+如果始终没有可用的授权项，可在 Finder 将原笔记根目录完整复制到用户文件夹下，例如 `~/iCourse/courses`，然后在 App 中把“笔记保存位置”改为这个新目录并保存设置。保留原目录直到确认新位置正常；完整复制可以带上既有转录和隐藏状态，避免重复调用 API。仅切换为空目录不会自动迁移旧笔记。
+
+0.3.1 起，程序会在学校登录和模型任务前检查所需目录。“只下载课程”不使用笔记目录。权限检查和友好提示不能替代系统授权，也不能保证此前被拒绝的 App 会自动弹出新的 Allow 对话框。[Apple 的文件访问权限说明](https://support.apple.com/guide/mac-help/control-access-to-files-and-folders-on-mac-mchld5a35146/mac)。
 
 如果 Finder 自己也无法写入，先解决磁盘问题。扩展坞连接不稳、只读挂载、文件系统损坏不会被隐私权限开关修复。不要用 `chmod 777` 或给 Python 加 `sudo` 代替定位原因。
 

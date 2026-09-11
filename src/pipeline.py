@@ -45,6 +45,7 @@ from src.artifacts import (
 )
 from src.pipeline_state import PipelineState, artifact_metadata, mark_stage, valid_artifact
 from src.summary_storage import archive_legacy_review_exports, archive_previous_note
+from src.storage_access import StorageAccessError, check_pipeline_storage, storage_error
 
 _STATE = None
 _TICK_KEY = "overall"
@@ -1257,10 +1258,8 @@ def _run_main() -> int:
         summary_dir_path = PROJECT_ROOT / summary_dir_path
     summary_dir = summary_dir_path.resolve()
 
-    if not args.list_only and needs_download:
-        out_dir.mkdir(parents=True, exist_ok=True)
-    if not args.list_only and needs_summary:
-        summary_dir.mkdir(parents=True, exist_ok=True)
+    # Fail before school login, downloads, model loading or paid note requests.
+    check_pipeline_storage(out_dir, summary_dir, mode=mode, list_only=args.list_only)
 
     # One persistent model process per pipeline, created only if needed.
     _transcriber_lock = threading.Lock()
@@ -1512,16 +1511,20 @@ def _run_main() -> int:
         if needs_download:
             video_dir.mkdir(parents=True, exist_ok=True)
 
-        summary_course_dir, summary_scan_dirs = _resolve_course_dirs(
-            summary_dir, course_id, course_title
-        )
-        for scan_dir in summary_scan_dirs:
-            _move_legacy_artifacts_to_layout(scan_dir)
-        summarized_sub_ids = _scan_summarized_sub_ids(summary_scan_dirs)
-        if needs_summary and summarized_sub_ids:
-            print(f"  Local summaries (by sub_id scan): {len(summarized_sub_ids)}")
+        summary_scan_dirs = []
+        # Download-only must not read, migrate or create anything in the notes root.
+        summary_course_dir = summary_dir / course_dir.name
         _, notes_dir, raw_txt_dir = _layout_paths(summary_course_dir)
         if needs_summary:
+            summary_course_dir, summary_scan_dirs = _resolve_course_dirs(
+                summary_dir, course_id, course_title
+            )
+            for scan_dir in summary_scan_dirs:
+                _move_legacy_artifacts_to_layout(scan_dir)
+            summarized_sub_ids = _scan_summarized_sub_ids(summary_scan_dirs)
+            if summarized_sub_ids:
+                print(f"  Local summaries (by sub_id scan): {len(summarized_sub_ids)}")
+            _, notes_dir, raw_txt_dir = _layout_paths(summary_course_dir)
             notes_dir.mkdir(parents=True, exist_ok=True)
             raw_txt_dir.mkdir(parents=True, exist_ok=True)
 
@@ -1676,8 +1679,8 @@ def main() -> int:
     from platformdirs import user_data_path
     global _STATE
     state_dir = Path(os.environ.get("ICOURSE_STATE_DIR") or user_data_path("Fudan iCourse", appauthor=False))
-    state_dir.mkdir(parents=True, exist_ok=True)
     try:
+        state_dir.mkdir(parents=True, exist_ok=True)
         with FileLock(state_dir / "pipeline.lock", timeout=0):
             _STATE = PipelineState(state_dir / "pipeline.sqlite3")
             try:
@@ -1688,6 +1691,13 @@ def main() -> int:
     except Timeout:
         print("另一个课程任务正在运行，请等待完成后重试。")
         return 2
+    except StorageAccessError as exc:
+        print(f"[存储错误] {exc}")
+        return 1
+    except PermissionError as exc:
+        # Also explain denials that occur after preflight, e.g. a protected child.
+        print(f"[存储错误] {storage_error(Path(exc.filename or state_dir), '文件或目录', exc)}")
+        return 1
 
 
 if __name__ == "__main__":
