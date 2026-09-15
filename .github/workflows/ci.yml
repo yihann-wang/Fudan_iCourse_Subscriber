@@ -40,10 +40,10 @@ jobs:
         run: sudo apt-get update && sudo apt-get install -y ffmpeg
       - name: Install locked dependencies (Mac)
         if: runner.os == 'macOS'
-        run: uv sync --locked --extra mac --extra cpu --python 3.13 --managed-python
+        run: uv sync --locked --extra mac --python 3.13 --managed-python
       - name: Install locked dependencies (Linux)
         if: runner.os == 'Linux'
-        run: uv sync --locked --extra cpu --python 3.13 --managed-python
+        run: uv sync --locked --python 3.13 --managed-python
       - name: Offline tests and lint
         run: |
           .venv/bin/pytest -q

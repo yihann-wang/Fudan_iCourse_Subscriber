@@ -5,16 +5,16 @@
 标准开发环境：Apple Silicon、macOS 14+、uv、ffmpeg，Python 3.13。
 
 ```sh
-uv sync --locked --extra mac --extra cpu --python 3.13 --managed-python
+uv sync --locked --extra mac --python 3.13 --managed-python
 .venv/bin/pytest -q
 .venv/bin/ruff check --select F src tools scripts main.py tests
 ```
 
 测试使用模拟登录、模型回答和临时文件，覆盖整课一次调用、失败重试、截断响应、转录产物校验、身份冲突、并发锁、外置目录布局、钥匙串失败和安装器。不要在自动化测试里填真实凭据、运行完整课程任务或发送邮件。
 
-GitHub Actions 在 macOS 14、macOS 26 和 Linux 上检查锁定依赖、代码、测试和 wheel。Mac 任务还会安装到临时目录、验证隔离运行环境和无界面的 Qt 窗口创建；不会下载语音模型或访问课程。这里的安装与导入检查不等于所有硬件上的真实 GPU 识别性能测试。
+GitHub Actions 在 macOS 14、macOS 26 和 Linux 上检查锁定依赖、代码、测试和 wheel。Mac 任务还会安装到临时目录、验证隔离运行环境和无界面的 Qt 窗口创建；不会访问课程或真实语音服务。新增本地 HTTP 模拟服务验证上传格式、模型切换、重试、取消和恢复。
 
-本地实机已完成真实回放的下载、转录和整课笔记生成验证。运行速度和识别效果随硬件、音质、网络和模型服务变化。Windows/NVIDIA 仅保留适配代码，未做本版硬件回归。
+本地实机已完成真实回放的下载、转录和整课笔记生成验证。运行速度和识别效果随硬件、音质、网络和模型服务变化。本地 MLX/CPU/CUDA 语音后端已移除；其他平台未做本版实机回归。
 
 ## 目录
 
@@ -27,7 +27,7 @@ GitHub Actions 在 macOS 14、macOS 26 和 Linux 上检查锁定依赖、代码�
 | `src/cli.py`、`src/engine.py` | 命令入口、取消和保持唤醒 |
 | `src/pipeline.py`、`src/pipeline_state.py` | 下载 → 转录 → 笔记队列、SQLite 状态与锁 |
 | `src/icourse.py`、`src/webvpn.py` | 学校登录、课程目录与回放 |
-| `src/asr/`、`src/transcriber.py`、`src/media.py` | MLX / CPU / CUDA 后端、持久进程、音频处理与字幕 |
+| `src/asr/`、`src/transcriber.py`、`src/media.py` | 兼容云端语音接口、可取消的网络进程、音频块缓存与可选字幕 |
 | `src/summarizer.py` | 整课单次请求、重试与完整响应验证 |
 | `src/artifacts.py`、`src/summary_storage.py` | 校验、隐藏状态、原子写入与历史 |
 | `scripts/install_mac_runtime.py`、`scripts/create_mac_app.py` | 独立运行环境与本机启动器 |
@@ -35,16 +35,18 @@ GitHub Actions 在 macOS 14、macOS 26 和 Linux 上检查锁定依赖、代码�
 | `tests/` | 不使用真实账号的回归测试 |
 | `main.py`、数据库/邮件相关模块与 `tools/` | 保留的旧接口；新入口优先使用 `src.cli` |
 
-每个阶段默认一个 worker，阶段之间可重叠工作。ASR 子进程复用模型，避免每课重新加载。取消会终止任务进程组；课程流水线互斥，安装器也检查同一把锁。
+每个阶段默认一个 worker，阶段之间可重叠工作。ASR 子进程只处理 HTTP 请求，方便取消正在上传或等待响应的请求。取消会终止任务进程组；课程流水线互斥，安装器也检查同一把锁。
 
 桌面引擎使用 `ICOURSE_EVENTS=json` 和每次新建的 `ICOURSE_RUN_ID`。stdout 只传版本 1 的 JSON 行；普通输出重定向到 stderr，供诊断面板使用。事件中的 `seq` 由同一个锁按写入顺序递增，任务身份为 `(course_id, sub_id)`。下载和音频进度由同步工作线程的上下文带上身份，不依赖中文日志的措辞。GUI 忽略旧运行、重复事件和终态后的进度。
 
-`--target COURSE:LECTURE` 可重复指定精确目标；`--resume-stage COURSE:LECTURE:dl|tr|sm` 仅作用于已指定目标。失败笔记重试跳过旧正式笔记，但复用有效转录和完整响应缓存；失败转录重试会重新识别该课次。未找到显式目标会报错，不会误报成功。GUI 自己维护的最近一次摘要只是展示记录，不另建任务队列。
+`--target COURSE:LECTURE` 可重复指定精确目标；`--resume-stage COURSE:LECTURE:dl|tr|sm` 仅作用于已指定目标。失败笔记重试跳过旧正式笔记，但复用有效转录和完整响应缓存；失败转录重试会复用该课次已成功的音频块。未找到显式目标会报错，不会误报成功。GUI 自己维护的最近一次摘要只是展示记录，不另建任务队列。
 
 离线测试还覆盖多课程同课次 ID、缓存运行的完整事件、十分钟进度不刷屏、失败重试、子进程停止、迟到事件、日志脱敏和滚动。Qt 测试使用默认配置和临时目录，不读取个人钥匙串。
 
 ## 不应回归的行为
 
+- 不引入本地语音模型依赖。语音接口只能发送配置的地址和模型；密钥经进程管道传递，不写到参数或缓存。
+- 没有真实完整时间戳时只导出文字；旧 SRT 隐藏归档，不生成假字幕。
 - 正常笔记只发一次请求，携带完整转录；不要悄悄引入提纲、分章或审核调用。
 - 空响应、输出截断或非正常结束不能写成成功产物。
 - 单独重做笔记必须复用转录；缺少转录时明确失败。

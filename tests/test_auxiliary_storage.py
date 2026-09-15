@@ -80,3 +80,20 @@ def test_flat_transcript_timecodes_move_with_text_not_video(tmp_path):
     assert internal_path(course / "原始txt" / segments.name).is_file()
     assert not internal_path(course / "录屏" / segments.name).exists()
     assert not valid_artifact(course / "原始txt" / transcript.name)
+
+
+def test_cloud_migration_keeps_verified_old_transcripts_and_notes(tmp_path, monkeypatch):
+    source = tmp_path / 'lecture.mp4'
+    source.write_bytes(b'original-video')
+    transcript = tmp_path / 'lecture.txt'
+    transcript.write_text('旧本地模型生成的原文')
+    artifact_metadata(transcript, source=source, settings_fingerprint='legacy-local-settings', backend='mlx')
+    notes = tmp_path / 'lecture.md'
+    notes.write_text('已有笔记')
+    artifact_metadata(notes, source=transcript)
+    # Reusing completed work must not validate or require the new API settings.
+    monkeypatch.setenv('ASR_BASE_URL', '')
+    monkeypatch.setenv('ASR_API_KEY', '')
+    assert valid_artifact(transcript) and valid_artifact(notes)
+    source.write_bytes(b'changed-video')
+    assert not valid_artifact(transcript) and not valid_artifact(notes)

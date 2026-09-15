@@ -59,7 +59,7 @@ def install(root: Path, support: Path, applications: Path) -> Path:
         launcher = Path(build) / "iCourse"
         compile_launcher(root, launcher)
         requirements = Path(build) / "requirements.txt"
-        run([uv, "export", "--locked", "--extra", "mac", "--extra", "cpu", "--no-dev",
+        run([uv, "export", "--locked", "--extra", "mac", "--no-dev",
              "--no-emit-project", "--format", "requirements-txt", "--output-file", str(requirements), "--quiet"])
         support.mkdir(parents=True, exist_ok=True)
         python = runtime / "bin" / "python"

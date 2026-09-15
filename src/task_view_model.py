@@ -5,7 +5,7 @@ import time
 from dataclasses import dataclass, field
 
 STAGES = ("dl", "tr", "sm")
-STAGE_NAMES = dict(dl="下载", tr="本机转录", sm="笔记")
+STAGE_NAMES = dict(dl="下载", tr="云端转录", sm="笔记")
 TERMINAL = {"done", "cached", "na", "pending", "failed", "cancelled", "interrupted"}
 LABELS = dict(queued="排队中", waiting="等待前序阶段", running="处理中", done="已完成",
               cached="使用已有", na="不适用", pending="等待回放", failed="失败",

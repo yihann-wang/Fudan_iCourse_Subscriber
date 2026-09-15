@@ -9,19 +9,20 @@ from pathlib import Path
 from platformdirs import user_config_path
 
 from .artifacts import atomic_write_json
+from .asr.types import DEFAULT_BASE_URL, DEFAULT_MODEL
 from .summary_settings import DEFAULT_OUTPUT_TOKENS, DEFAULT_TIMEOUT_MINUTES
 
 SERVICE = "Fudan iCourse Subscriber"
-SECRET_FIELDS = ("uis_psw", "llm_api_key_1")
+SECRET_FIELDS = ("uis_psw", "llm_api_key_1", "asr_api_key")
 
 
 def defaults():
     home = Path.home() / "iCourse"
     return dict(mode="download_and_summarize", stu_id="", uis_psw="", course_ids="",
                 sub_ids="", skip_time_periods="", out_dir=str(home / "课程"),
-                summary_dir=str(home / "笔记"), local_media="", asr_backend="auto",
-                whisper_model="large-v3-turbo", whisper_language="zh",
-                whisper_compute_type="auto", chunk_seconds=300,
+                summary_dir=str(home / "笔记"), local_media="", asr_base_url=DEFAULT_BASE_URL, asr_model=DEFAULT_MODEL,
+                asr_api_key="", asr_language="", asr_prompt="", asr_response_format="",
+                chunk_seconds=300, asr_max_upload_mb=20, asr_timeout_seconds=300, asr_retries=2,
                 llm_name_1="LLM", llm_api_key_1="", llm_base_url_1="", llm_models_1="",
                 llm_output_tokens=DEFAULT_OUTPUT_TOKENS,
                 llm_timeout_minutes=DEFAULT_TIMEOUT_MINUTES,
@@ -82,12 +83,14 @@ def runtime_environment(values, base=None):
         if key.startswith(("LLM_", "WHISPER_", "ASR_", "GEMINI_", "DASHSCOPE_", "ANTHROPIC_")):
             env.pop(key)
     mapping = dict(stu_id="StuId", uis_psw="UISPsw", course_ids="COURSE_IDS",
-                   asr_backend="ASR_BACKEND", whisper_model="ASR_MODEL",
-                   whisper_language="WHISPER_LANGUAGE", whisper_compute_type="WHISPER_COMPUTE_TYPE",
+                   asr_base_url="ASR_BASE_URL", asr_model="ASR_MODEL", asr_api_key="ASR_API_KEY",
+                   asr_language="ASR_LANGUAGE", asr_prompt="ASR_INITIAL_PROMPT",
+                   asr_response_format="ASR_RESPONSE_FORMAT", asr_max_upload_mb="ASR_MAX_UPLOAD_MB",
+                   asr_timeout_seconds="ASR_TIMEOUT_SECONDS", asr_retries="ASR_RETRIES",
                    chunk_seconds="ASR_CHUNK_SECONDS", llm_name_1="LLM_NAME_1",
                    llm_api_key_1="LLM_API_KEY_1", llm_base_url_1="LLM_BASE_URL_1", llm_models_1="LLM_MODELS_1")
     for field, key in mapping.items():
-        env[key] = str(values.get(field, ""))
+        env[key] = str(values.get(field, defaults().get(field, "")))
     for field, key, scale in (("llm_output_tokens", "LLM_MAX_OUTPUT_TOKENS", 1),
                               ("llm_timeout_minutes", "API_TIMEOUT_MS", 60000)):
         value = int(values.get(field, defaults()[field]))

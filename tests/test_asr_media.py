@@ -5,46 +5,23 @@ from dataclasses import replace
 import pytest
 
 from src.asr import ASRSettings
-from src.asr.types import MLX_MODEL, MLX_REVISION
-from src.asr.worker import merge_chunk_segments
 from src.media import CancelledError, IncompleteAudioError, decode, probe, resolve_media_tool, run_media
 from src.transcriber import Transcriber, write_srt
 
 
-@pytest.fixture
-def apple(monkeypatch):
-    monkeypatch.setattr("src.asr.types.platform.system", lambda: "Darwin")
-    monkeypatch.setattr("src.asr.types.platform.machine", lambda: "arm64")
+def test_old_local_environment_migrates_to_cloud():
+    from src.asr.types import DEFAULT_MODEL
+    settings = ASRSettings.from_env({"ASR_BACKEND": "mlx", "ASR_MODEL": "old-local-model",
+                                     "WHISPER_DEVICE": "cuda"})
+    assert settings.backend == "cloud" and settings.model == DEFAULT_MODEL
 
 
-def test_old_cuda_config_selects_mlx_on_mac(apple):
-    s = ASRSettings.from_env({"WHISPER_DEVICE": "cuda", "WHISPER_COMPUTE_TYPE": "int8_float16"})
-    assert (s.backend, s.model, s.revision, s.compute_type) == ("mlx", MLX_MODEL, MLX_REVISION, "float16")
-
-
-def test_cpu_uses_supported_precision(apple):
-    assert ASRSettings.from_env({"ASR_BACKEND": "cpu", "WHISPER_COMPUTE_TYPE": "int8_float16"}).compute_type == "int8"
-
-
-@pytest.mark.parametrize("backend", ["mps", "cuda"])
-def test_invalid_mac_device_fails_early(apple, backend):
-    with pytest.raises(ValueError):
-        ASRSettings(backend=backend).resolved()
-
-
-def test_settings_fingerprint_changes_with_decoding_options(apple):
+def test_fingerprint_ignores_secret_but_tracks_service_and_model():
     a = ASRSettings().resolved()
-    assert a.fingerprint != replace(a, language="en").fingerprint
-    assert a.fingerprint != replace(a, chunk_seconds=60).fingerprint
-
-
-def test_chunk_overlap_assigns_one_owner():
-    segments = [dict(start=57, end=59, text="前句"), dict(start=59, end=61, text="边界"),
-                dict(start=61, end=63, text="后句")]
-    first = merge_chunk_segments(segments, read_start=0, core_start=0, core_end=60, duration=120)
-    second = merge_chunk_segments([dict(start=s["start"] - 58, end=s["end"] - 58, text=s["text"]) for s in segments],
-                                  read_start=58, core_start=60, core_end=120, duration=120)
-    assert [s["text"] for s in first + second] == ["前句", "边界", "后句"]
+    assert a.fingerprint == replace(a, api_key="different", retries=4).fingerprint
+    for field, value in (("language", "en"), ("model", "other"), ("chunk_seconds", 60),
+                         ("base_url", "https://example.invalid/v1")):
+        assert a.fingerprint != replace(a, **{field: value}).fingerprint
 
 
 def test_srt_timestamps_are_valid_and_atomic(tmp_path):
@@ -82,7 +59,11 @@ def test_media_cancel_terminates_child():
 
 
 def test_failed_attempt_does_not_reuse_previous_segments(monkeypatch, wav, tmp_path):
-    transcriber = Transcriber(ASRSettings(backend="cpu"))
+    # Use non-silent audio so the service is consulted.
+    with wave.open(str(wav), "wb") as audio:
+        audio.setparams((1, 2, 16000, 0, "NONE", "not compressed"))
+        audio.writeframes(b"\x10\x10" * 16000)
+    transcriber = Transcriber(ASRSettings(), cache_dir=tmp_path / "cache")
     monkeypatch.setattr(transcriber._worker, "request", lambda *a, **k: dict(
         segments=[dict(start=0, end=1, text="第一节课")], language="zh", revision="test"))
     assert transcriber.transcribe_video(wav) == "第一节课"

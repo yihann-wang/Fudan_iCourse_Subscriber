@@ -1,4 +1,4 @@
-"""Cancellable client; never imports MLX into a GUI or a pipeline thread."""
+"""Cancellable cloud client. Secrets travel through a private pipe, never argv."""
 
 import atexit
 import json
@@ -13,7 +13,7 @@ from pathlib import Path
 from ..media import CancelledError, windows_subprocess_kwargs
 
 
-class ASRWorker:
+class CloudWorker:
     def __init__(self, settings):
         self.settings = settings.resolved()
         self.process = None
@@ -26,8 +26,6 @@ class ASRWorker:
             return
         self.messages = queue.Queue()
         command = [sys.executable, "-m", "src.asr.worker"]
-        if getattr(sys, "frozen", False):
-            command = [sys.executable, "--asr-worker"]
         self.process = subprocess.Popen(
             command, stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True,
             encoding="utf-8", bufsize=1, cwd=Path(__file__).resolve().parents[2],
@@ -41,17 +39,20 @@ class ASRWorker:
                     try:
                         messages.put(json.loads(line))
                     except json.JSONDecodeError:
-                        messages.put(dict(event="error", message="模型进程返回了无效数据。"))
+                        messages.put(dict(event="error", message="语音服务进程返回了无效数据。"))
             finally:
                 messages.put(dict(event="closed"))
 
         threading.Thread(target=read, daemon=True, name="asr-protocol").start()
 
-    def request(self, path=None, *, cancel=None, progress=None, timeout=21600):
+    def request(self, path=None, *, cancel=None, progress=None, duration=None, timeout=None):
         with self.lock:
+            if cancel is not None and cancel.is_set():
+                raise CancelledError("转录已取消。")
+            timeout = timeout or (self.settings.timeout_seconds + 15) * (self.settings.retries + 1) + 360
             self._start()
-            self.process.stdin.write(json.dumps(dict(op="prepare" if path is None else "transcribe",
-                                                     settings=asdict(self.settings), path=str(path))) + "\n")
+            self.process.stdin.write(json.dumps(dict(op="check" if path is None else "transcribe",
+                                                     settings=asdict(self.settings), path=str(path), duration=duration)) + "\n")
             self.process.stdin.flush()
             started = time.monotonic()
             try:
@@ -68,7 +69,7 @@ class ASRWorker:
                     if event == "result":
                         return message
                     if event in {"error", "closed"}:
-                        raise RuntimeError(message.get("message", "模型进程意外退出。"))
+                        raise RuntimeError(message.get("message", "语音服务进程意外退出。"))
                     if progress:
                         progress(message)
             except BaseException:

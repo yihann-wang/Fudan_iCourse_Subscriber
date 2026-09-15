@@ -1,2 +1,2 @@
 # Compatibility installation. Prefer uv sync --locked for reproducibility.
--e .[mac,cpu]
+-e .[mac]

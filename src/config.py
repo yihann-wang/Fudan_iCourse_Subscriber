@@ -190,17 +190,6 @@ DATA_DIR = os.environ.get("DATA_DIR", "data")
 VIDEO_DIR = os.path.join(DATA_DIR, "videos")
 DB_PATH = os.environ.get("DB_PATH", os.path.join(DATA_DIR, "icourse.db"))
 
-# Compatibility settings. Backend selection and validation live in asr/types.py.
-ASR_BACKEND = os.environ.get("ASR_BACKEND", "auto").strip()
-WHISPER_MODEL = os.environ.get("WHISPER_MODEL", "large-v3-turbo").strip()
-WHISPER_DEVICE = os.environ.get("WHISPER_DEVICE", "auto").strip()
-WHISPER_COMPUTE_TYPE = os.environ.get("WHISPER_COMPUTE_TYPE", "auto").strip()
-WHISPER_LANGUAGE = os.environ.get("WHISPER_LANGUAGE", "zh").strip()
-WHISPER_BEAM_SIZE = int(os.environ.get("WHISPER_BEAM_SIZE", "5"))
-WHISPER_VAD_FILTER = _parse_bool(
-    os.environ.get("WHISPER_VAD_FILTER", ""), default=True
-)
-
 # 监控的课程 ID 列表
 COURSE_IDS = [
     c.strip()

@@ -83,7 +83,7 @@ class TaskPanel(QWidget):
         layout.addWidget(self.progress)
         self.tree = QTreeWidget()
         self.tree.setColumnCount(4)
-        self.tree.setHeaderLabels(["课程 / 课次", "下载", "本机转录", "笔记"])
+        self.tree.setHeaderLabels(["课程 / 课次", "下载", "云端转录", "笔记"])
         self.tree.setRootIsDecorated(True)
         self.tree.setAlternatingRowColors(True)
         self.tree.setUniformRowHeights(True)

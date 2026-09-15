@@ -22,8 +22,8 @@ fi
 print "安装 iCourse。请先关闭正在运行的 iCourse 任务和窗口。"
 # A managed interpreter survives Homebrew Python upgrades and moving this checkout.
 uv python install 3.13
-uv sync --locked --extra mac --extra cpu --no-dev --python 3.13 --managed-python
+uv sync --locked --extra mac --no-dev --python 3.13 --managed-python
 .venv/bin/python -m src.cli doctor
 .venv/bin/python scripts/install_mac_runtime.py
 print "安装完成。请在 Finder 中按 Command+Shift+G，输入 ~/Applications，打开 iCourse.app。"
-print "也可以双击 启动 iCourse.command。首次转录需要下载模型。"
+print "也可以双击 启动 iCourse.command。请在设置中填写语音服务地址、模型和 API Key。"

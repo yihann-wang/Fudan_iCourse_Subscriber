@@ -88,8 +88,9 @@ def _write_env(path: Path, values: dict[str, str]) -> None:
         f"COURSE_IDS={values.get('COURSE_IDS', '')}",
         f"DOWNLOAD_DIR={values.get('DOWNLOAD_DIR', '')}",
         f"SUMMARY_DIR={values.get('SUMMARY_DIR', '')}",
-        f"ASR_BACKEND={values.get('ASR_BACKEND', 'auto')}",
-        f"WHISPER_MODEL={values.get('WHISPER_MODEL', 'large-v3-turbo')}",
+        f"ASR_BASE_URL={values.get('ASR_BASE_URL', '')}",
+        f"ASR_API_KEY={values.get('ASR_API_KEY', '')}",
+        f"ASR_MODEL={values.get('ASR_MODEL', '')}",
         f"LLM_NAME_1={values.get('LLM_NAME_1', '')}",
         f"LLM_API_KEY_1={values.get('LLM_API_KEY_1', '')}",
         f"LLM_BASE_URL_1={values.get('LLM_BASE_URL_1', '')}",
@@ -97,7 +98,6 @@ def _write_env(path: Path, values: dict[str, str]) -> None:
         "DASHSCOPE_API_KEY=",
         "GEMINI_API_KEY=",
     ]
-    lines += [f"WHISPER_DEVICE={values.get('WHISPER_DEVICE', 'auto')}", "WHISPER_COMPUTE_TYPE=auto"]
     path.write_text("\n".join(lines) + "\n", encoding="utf-8")
     path.chmod(0o600)
 
@@ -107,6 +107,8 @@ def main() -> int:
     print("全部配置手动输入，不读取已有 .env。")
     print("将根据输入自动调用 downloader（下载/总结）。")
     project_root = _resolve_project_root()
+    if str(project_root) not in sys.path:
+        sys.path.insert(0, str(project_root))
 
     mode = _pick_mode("summarize")
     course_ids = _prompt_required("课程编号 COURSE_IDS（逗号分隔）")
@@ -135,12 +137,10 @@ def main() -> int:
         runtime_values["LLM_API_KEY_1"] = _prompt_required("LLM_API_KEY_1", secret=True)
         runtime_values["LLM_BASE_URL_1"] = _prompt_required("LLM_BASE_URL_1")
         runtime_values["LLM_MODELS_1"] = _prompt_required("LLM_MODELS_1")
-        runtime_values["WHISPER_MODEL"] = _prompt_required(
-            "WHISPER_MODEL", "large-v3-turbo"
-        )
-        runtime_values["WHISPER_DEVICE"] = _prompt_required(
-            "WHISPER_DEVICE", "auto"
-        )
+        from src.asr.types import DEFAULT_BASE_URL, DEFAULT_MODEL
+        runtime_values["ASR_BASE_URL"] = _prompt_required("语音服务地址", DEFAULT_BASE_URL)
+        runtime_values["ASR_MODEL"] = _prompt_required("语音模型", DEFAULT_MODEL)
+        runtime_values["ASR_API_KEY"] = _prompt_required("语音服务 API Key", secret=True)
 
     keep_generated = _prompt_yes_no("是否保留配置文件 .env.interactive.generated", default_yes=True)
     env_file = project_root / (

@@ -71,7 +71,7 @@ class MainWindow(QMainWindow):
         title = QLabel("iCourse 课程助手")
         title.setStyleSheet("font-size: 23px; font-weight: 600; padding: 8px 0;")
         layout.addWidget(title)
-        subtitle = QLabel("下载课程录像，在这台 Mac 上转录，生成字幕与学习笔记。")
+        subtitle = QLabel("下载课程录像，使用云端语音转录，生成整课学习笔记。")
         layout.addWidget(subtitle)
         self.tabs = QTabWidget()
         self.toggle_settings = QPushButton("收起任务设置")
@@ -147,27 +147,37 @@ class MainWindow(QMainWindow):
             field.setValue(int(self.values.get(name, default)))
             self.fields[name] = field
             config.addRow(label, field)
-        self.backend = QComboBox()
-        for label, value in [("自动选择（Apple Silicon 使用 MLX）", "auto"), ("Apple GPU · MLX", "mlx"), ("CPU 备用", "cpu")]:
-            self.backend.addItem(label, value)
-        self.backend.setCurrentIndex(max(0, self.backend.findData(self.values.get("asr_backend", "auto"))))
-        self.fields["asr_backend"] = self.backend
-        config.addRow("本地转录", self.backend)
-        self.add_text(config, "whisper_model", "转录模型", "large-v3-turbo 或本地模型文件夹")
-        self.add_text(config, "whisper_language", "识别语言", "zh；留空自动检测")
-        chunk = QSpinBox()
-        chunk.setRange(30, 1800)
-        chunk.setSingleStep(30)
-        chunk.setSuffix(" 秒")
-        chunk.setValue(int(self.values.get("chunk_seconds", 300)))
-        self.fields["chunk_seconds"] = chunk
-        config.addRow("每块音频长度", chunk)
-        hint = QLabel("密码和 API Key 保存到 macOS 钥匙串。转录在本机完成；生成笔记会将转录文本发送到你配置的服务。")
+        self.add_text(config, "asr_base_url", "语音服务地址", "OpenAI 兼容的音频上传接口，例如 https://api.siliconflow.cn/v1")
+        self.add_text(config, "asr_model", "语音模型", "填写服务商提供的完整模型名称，可随时更换")
+        self.add_text(config, "asr_api_key", "语音服务 API Key", secret=True)
+        self.add_text(config, "asr_language", "语音语言（可选）", "默认留空；服务支持时可填 zh 或 en")
+        self.add_text(config, "asr_prompt", "专业术语（可选）", "仅在语音服务支持 prompt 时填写")
+        response_format = QComboBox()
+        for label, value in [("服务默认（推荐）", ""), ("JSON 文本", "json"),
+                             ("带时间戳 JSON", "verbose_json"), ("纯文本", "text"), ("SRT 字幕", "srt")]:
+            response_format.addItem(label, value)
+        response_format.setCurrentIndex(max(0, response_format.findData(self.values.get("asr_response_format", ""))))
+        self.fields["asr_response_format"] = response_format
+        config.addRow("语音返回格式", response_format)
+        for name, label, default, low, high, suffix in (
+            ("chunk_seconds", "音频块最长时长", 300, 30, 1800, " 秒"),
+            ("asr_max_upload_mb", "单次上传大小上限", 20, 1, 100, " MB"),
+            ("asr_timeout_seconds", "语音请求等待上限", 300, 10, 3600, " 秒"),
+            ("asr_retries", "语音请求重试次数", 2, 0, 5, " 次"),
+        ):
+            field = QSpinBox()
+            field.setRange(low, high)
+            field.setSuffix(suffix)
+            field.setValue(int(self.values.get(name, default)))
+            self.fields[name] = field
+            config.addRow(label, field)
+        hint = QLabel("密码和 API Key 保存到 macOS 钥匙串。音频发送至语音服务，合并后的整课文字发送至笔记服务。"
+                      "只有语音服务返回真实时间戳时才生成字幕。已有转录可以继续复用。")
         hint.setWordWrap(True)
         config.addRow(hint)
         config_buttons = QHBoxLayout()
         for label, callback in [("保存设置", self.save), ("检查环境", lambda: self.launch("doctor")),
-                                ("准备转录模型", lambda: self.launch("prepare-model"))]:
+                                ("检查语音连接", lambda: self.launch("check-asr"))]:
             button = QPushButton(label)
             button.clicked.connect(callback)
             config_buttons.addWidget(button)

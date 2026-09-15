@@ -1,99 +1,85 @@
+"""Cloud speech configuration. Credentials never participate in cache metadata."""
+
 import hashlib
 import json
 import os
-import platform
-from dataclasses import asdict, dataclass, field
-from pathlib import Path
+from dataclasses import asdict, dataclass, field, replace
+from urllib.parse import urlsplit, urlunsplit
 
-from ..artifacts import cached_file_sha256
-
-MLX_MODEL = "mlx-community/whisper-large-v3-turbo"
-MLX_REVISION = "a4aaeec0636e6fef84abdcbe3544cb2bf7e9f6fb"
-CPU_REVISION = "0a363e9161cbc7ed1431c9597a8ceaf0c4f78fcf"
+DEFAULT_BASE_URL = "https://api.siliconflow.cn/v1"
+DEFAULT_MODEL = "XingChenAGI/XingChenASR-V3.2-Ultra"
 
 
 @dataclass(frozen=True)
 class ASRSettings:
-    backend: str = "auto"
-    model: str = "large-v3-turbo"
-    revision: str = ""
-    language: str = "zh"
-    compute_type: str = "auto"
-    beam_size: int = 5
-    vad_filter: bool = True
-    chunk_seconds: int = 300
-    overlap_seconds: float = 2.0
+    base_url: str = DEFAULT_BASE_URL
+    api_key: str = field(default="", repr=False, compare=False)
+    model: str = DEFAULT_MODEL
+    language: str = ""
     initial_prompt: str = ""
-    offline: bool = False
+    response_format: str = ""
+    chunk_seconds: int = 300
+    max_upload_mb: int = 20
+    timeout_seconds: int = 300
+    retries: int = 2
+    backend: str = "cloud"
+    revision: str = ""
 
     @classmethod
     def from_env(cls, env=None):
         env = os.environ if env is None else env
-        backend = env.get("ASR_BACKEND", "auto").strip().lower()
-        # Old CUDA settings must not select a CUDA runtime on Apple Silicon.
-        if backend == "auto" and env.get("WHISPER_DEVICE") == "cpu":
-            backend = "cpu"
-        elif backend == "auto" and platform.system() != "Darwin":
-            backend = env.get("WHISPER_DEVICE", "auto").strip().lower()
+        model = env.get("ASR_MODEL", DEFAULT_MODEL).strip()
+        # Old local model choices cannot accidentally be sent to a cloud vendor.
+        if env.get("ASR_BACKEND") in {"auto", "mlx", "cpu", "cuda"}:
+            model = DEFAULT_MODEL
         return cls(
-            backend=backend,
-            model=env.get("ASR_MODEL", env.get("WHISPER_MODEL", "large-v3-turbo")).strip(),
-            revision=env.get("ASR_MODEL_REVISION", "").strip(),
-            language=env.get("WHISPER_LANGUAGE", "zh").strip(),
-            compute_type=env.get("WHISPER_COMPUTE_TYPE", "auto").strip(),
-            beam_size=int(env.get("WHISPER_BEAM_SIZE", "5")),
-            vad_filter=env.get("WHISPER_VAD_FILTER", "true").lower() in {"1", "true", "yes"},
+            base_url=env.get("ASR_BASE_URL", DEFAULT_BASE_URL).strip(),
+            api_key=env.get("ASR_API_KEY", "").strip(), model=model,
+            language=env.get("ASR_LANGUAGE", "").strip(),
+            initial_prompt=env.get("ASR_INITIAL_PROMPT", "").strip(),
+            response_format=env.get("ASR_RESPONSE_FORMAT", "").strip(),
             chunk_seconds=int(env.get("ASR_CHUNK_SECONDS", "300")),
-            overlap_seconds=float(env.get("ASR_OVERLAP_SECONDS", "2")),
-            initial_prompt=env.get("ASR_INITIAL_PROMPT", ""),
-            offline=env.get("HF_HUB_OFFLINE", "0").lower() in {"1", "true", "yes"},
+            max_upload_mb=int(env.get("ASR_MAX_UPLOAD_MB", "20")),
+            timeout_seconds=int(env.get("ASR_TIMEOUT_SECONDS", "300")),
+            retries=int(env.get("ASR_RETRIES", "2")),
         ).resolved()
 
     def resolved(self):
-        values = asdict(self)
-        apple = platform.system() == "Darwin" and platform.machine() == "arm64"
-        backend = self.backend
-        if backend == "auto":
-            backend = "mlx" if apple else "cpu"
-        if backend not in {"mlx", "cpu", "cuda"}:
-            raise ValueError("ASR_BACKEND 必须是 auto、mlx、cpu 或 cuda；CTranslate2 不支持 mps。")
-        if backend == "mlx" and not apple:
-            raise ValueError("MLX 后端需要 Apple Silicon Mac。请使用 ASR_BACKEND=cpu。")
-        if backend == "cuda" and platform.system() == "Darwin":
-            raise ValueError("macOS 不支持 CUDA；请使用 ASR_BACKEND=mlx 或 cpu。")
-        if not 30 <= self.chunk_seconds <= 1800:
-            raise ValueError("ASR_CHUNK_SECONDS 必须在 30–1800 秒之间。")
-        if not 0 <= self.overlap_seconds <= min(10, self.chunk_seconds / 4):
-            raise ValueError("ASR_OVERLAP_SECONDS 必须在 0–10 秒之间。")
-        model = self.model
-        if not model:
-            raise ValueError("转录模型不能为空。")
-        if backend == "mlx":
-            values["beam_size"] = 1
-            values["vad_filter"] = False
-            if model == "large-v3-turbo":
-                model = MLX_MODEL
-            elif "/" not in model and not Path(model).is_dir():
-                model = "mlx-community/whisper-" + model
-            values["compute_type"] = "float32" if self.compute_type == "float32" else "float16"
-            if model == MLX_MODEL and not self.revision:
-                values["revision"] = MLX_REVISION
-        elif backend == "cpu" and self.compute_type in {"auto", "int8_float16", "float16"}:
-            values["compute_type"] = "int8"
-        if backend in {"cpu", "cuda"} and model == "large-v3-turbo" and not self.revision:
-            values["revision"] = CPU_REVISION
-        values.update(backend=backend, model=model)
-        return ASRSettings(**values)
+        url = urlsplit(self.base_url.strip().rstrip("/"))
+        if (not url.hostname or url.username or url.password or url.query or url.fragment or
+                (url.scheme != "https" and not (url.scheme == "http" and
+                 url.hostname in {"localhost", "127.0.0.1", "::1"}))):
+            raise ValueError("转录服务地址必须是 HTTPS 地址，不能包含密码、查询参数或片段。")
+        path = url.path.rstrip("/")
+        if path.endswith("/audio/transcriptions"):
+            path = path[:-len("/audio/transcriptions")]
+        if not self.model.strip():
+            raise ValueError("请填写语音服务提供的模型名称。")
+        if self.backend != "cloud":
+            raise ValueError("本地转录已移除，请配置云端语音服务。")
+        for name, value, low, high in (
+            ("音频块时长", self.chunk_seconds, 30, 1800),
+            ("上传大小", self.max_upload_mb, 1, 100),
+            ("请求超时", self.timeout_seconds, 10, 3600),
+            ("重试次数", self.retries, 0, 5),
+        ):
+            if not low <= value <= high:
+                raise ValueError(f"{name}必须在 {low}–{high} 之间。")
+        if self.response_format not in {"", "json", "verbose_json", "text", "srt"}:
+            raise ValueError("不支持该转录返回格式。")
+        return replace(self, base_url=urlunsplit((url.scheme, url.netloc, path, "", "")),
+                       model=self.model.strip(), api_key=self.api_key.strip())
+
+    def public_dict(self):
+        return {key: value for key, value in asdict(self).items() if key != "api_key"}
 
     @property
     def fingerprint(self):
-        value = asdict(self)
-        model = Path(self.model).expanduser()
-        if model.is_dir():
-            value["local_model_files"] = {
-                p.name: cached_file_sha256(p) for p in model.iterdir()
-                if p.is_file() and p.suffix in {".json", ".bin", ".npz", ".safetensors"}
-            }
+        value = self.public_dict()
+        # Changing a key or a transport retry budget must not re-bill completed audio.
+        for key in ("timeout_seconds", "retries"):
+            value.pop(key)
+        value["protocol_version"] = 1
         return hashlib.sha256(json.dumps(value, sort_keys=True).encode()).hexdigest()
 
 

@@ -134,10 +134,10 @@ def valid_artifact(path):
         source = metadata.get("source")
         if source and (not Path(source).is_file() or cached_file_sha256(source) != metadata["source_sha256"]):
             return False
-        if path.suffix == ".txt":
-            from .asr import ASRSettings
-            if metadata.get("settings_fingerprint") != ASRSettings.from_env().fingerprint:
-                return False
+        # Completed transcripts, like notes, belong to the user. A backend
+        # migration must not invalidate an entire semester of verified files.
+        # Explicit overwrite/resume-stage selects work; chunk caches still
+        # distinguish models and source contents.
         if path.suffix == ".md":
             # Completed notes belong to the user. New LLM defaults only apply
             # to new work; explicit --overwrite requests regeneration.

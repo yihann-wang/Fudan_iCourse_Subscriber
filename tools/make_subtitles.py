@@ -2,7 +2,7 @@
 """Batch-generate soft subtitles (.srt) for already-downloaded lectures.
 
 Walks every ``*/录屏/*.mp4`` under the given root(s), transcribes each video
-with the local faster-whisper model, and writes a same-named ``.srt`` next to
+with a configured cloud speech model, and writes a same-named ``.srt`` next to
 it so players (VLC / PotPlayer / mpv) auto-load it.
 
 Resumable: a lecture that already has a ``.srt`` is skipped, so the job can be
@@ -11,8 +11,8 @@ stopped and re-run freely. No LLM / summary work — subtitles only.
 Usage:
     python tools/make_subtitles.py [ROOT ...] [--overwrite]
 
-ROOT defaults to ~/iCourse/课程 on Mac. Set WHISPER_MODEL to a local snapshot path
-to avoid any network download.
+ROOT defaults to ~/iCourse/课程 on Mac. Set ASR_BASE_URL, ASR_MODEL and ASR_API_KEY. The provider must return real
+timestamps (e.g. ASR_RESPONSE_FORMAT=verbose_json).
 """
 
 from __future__ import annotations
@@ -92,7 +92,7 @@ def main() -> int:
         print(f"{_ts()} nothing to do — all videos already subtitled.")
         return 0
 
-    # Import here so the scan/usage message shows before the model loads.
+    # Import after scanning the requested files.
     from src.transcriber import Transcriber  # noqa: E402
 
     transcriber = Transcriber()
@@ -109,11 +109,8 @@ def main() -> int:
             n = transcriber.write_srt(srt)
             dt = time.time() - t0
             if n == 0:
-                # No speech (holiday / mic off) — drop the empty .srt.
-                if srt.exists():
-                    srt.unlink()
-                silent += 1
-                print(f"{_ts()}   silent (no speech) · {dt:.0f}s", flush=True)
+                failed += 1
+                print(f"{_ts()}   服务未提供时间戳，无法生成字幕；请选择支持字幕的模型。", flush=True)
             else:
                 ok += 1
                 print(

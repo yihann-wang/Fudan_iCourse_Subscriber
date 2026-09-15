@@ -1,6 +1,6 @@
 # Fudan iCourse Subscriber · Mac 版
 
-在 Mac 上下载自己有权访问的复旦 iCourse 课程回放，使用本机 Apple GPU 转录，生成字幕与学习笔记。
+在 Mac 上下载自己有权访问的复旦 iCourse 课程回放，通过可配置的云端语音接口转录，生成整课学习笔记。
 
 **整节课一次总结，正常成功时只调用一次笔记 API。** 保留正常标题和段落，每个课次输出一份 Markdown 笔记。视频可放外置硬盘，文字笔记可留在电脑中。
 
@@ -11,12 +11,12 @@
 ## 支持范围
 
 - **Apple Silicon（M 系列）Mac，macOS 14.0 或更新版本**；安装时自动准备 Python 3.13。
-- 需要 `uv`、`ffmpeg`，通过 Homebrew 安装即可。首次安装和下载转录模型需要网络。
-- 下载课程需要自己的复旦 UIS 账号；生成笔记需要自己的模型服务 API Key。
-- Intel Mac 不在当前安装器支持范围内。保留 CPU/CUDA 后端，但 Windows/NVIDIA 未完成本版硬件验证。
+- 需要 `uv`、`ffmpeg`，通过 Homebrew 安装即可。安装及云端转录需要网络。
+- 下载课程需要自己的复旦 UIS 账号；转录和生成笔记分别使用自己的语音服务、笔记服务 API Key。
+- Intel Mac 不在当前安装器支持范围内。本版已移除本地转录；其他平台的命令行没有完成实机验证。
 - 这是**在本机安装的桌面版**，不是签名、公证后的独立 DMG。请分享源码或本仓库地址，让每位用户各自安装。
 
-MLX 的系统要求见[官方安装说明](https://ml-explore.github.io/mlx/build/html/install.html)。本地实机验证环境为 Apple M5 Pro、macOS 26.4；其他支持版本由依赖约束和持续集成进一步检查。
+0.5.0 起不再安装或加载 MLX、Whisper、PyTorch 等本地转录组件。Mac 只提取和压缩音频，语音识别由服务端完成。
 
 ## 安装
 
@@ -38,7 +38,7 @@ MLX 的系统要求见[官方安装说明](https://ml-explore.github.io/mlx/buil
 
 3. 安装完成后，在 **Finder** 中按 **Command+Shift+G**，输入 `~/Applications`，打开 **iCourse.app**。
 
-安装器会下载依赖。首次使用“准备转录模型”或开始转录时，还会下载默认模型；下载完成后可重复使用。安装本身不会登录学校、生成笔记或发送邮件。
+安装器只安装运行依赖，不下载语音模型。安装本身不会登录学校、生成笔记或发送邮件。
 
 ## 第一次使用
 
@@ -49,8 +49,10 @@ MLX 的系统要求见[官方安装说明](https://ml-explore.github.io/mlx/buil
 | 学号、统一身份认证密码 | 自己的复旦 UIS 凭据；只转录本地文件时可留空 |
 | 笔记服务地址 | 服务商的 API 基础地址 |
 | 笔记模型 | 服务商提供的准确模型 ID |
-| 笔记服务 API Key | 自己的 API Key；只下载或本地转录时可留空 |
-| 本地转录 | 保持“自动选择”，M 系列使用 Apple GPU / MLX |
+| 笔记服务 API Key | 自己的 API Key；只下载或单独转录音视频时可留空 |
+| 语音服务地址 | 默认 `https://api.siliconflow.cn/v1`，也支持其他兼容音频接口 |
+| 语音模型 | 默认 `XingChenAGI/XingChenASR-V3.2-Ultra`；可填写其他完整模型 ID |
+| 语音服务 API Key | 自己的语音服务凭据，与笔记服务分别保存 |
 | 单次输出上限、单次请求最长等待 | 默认 `65536 tokens`、`20 分钟`；所用模型需支持该输出预算 |
 
 例如 DeepSeek 官方 API：地址填 `https://api.deepseek.com`，模型填 `deepseek-v4-flash`，API Key 从自己的 DeepSeek 账户取得。模型名称以[官方文档](https://api-docs.deepseek.com/)为准。
@@ -63,15 +65,17 @@ MLX 的系统要求见[官方安装说明](https://ml-explore.github.io/mlx/buil
 4. 第一次建议只填一个课次。普通运行保持两个“重新生成”选项未勾选。
 5. 切回“设置”，点击“保存设置”；返回“任务”，点击“开始任务”。
 
-密码和 API Key 保存在 **macOS Keychain**；普通设置保存到当前用户的 Application Support。转录在本机完成；生成笔记会将完整转录文本发送给你配置的模型服务，API 费用由该服务收取。
+密码和 API Key 保存在 **macOS Keychain**；普通设置保存到当前用户的 Application Support。音频上传到配置的语音服务，完整转录文字发送到笔记服务。费用和限额以各服务商为准。[语音配置与切换模型](docs/cloud-asr.md)。
 
 ## 输出是什么
 
 | 位置 | 内容 |
 |---|---|
-| 课程保存位置 | 按课程整理的 MP4 回放、同名 SRT 字幕 |
+| 课程保存位置 | 按课程整理的 MP4 回放；语音服务提供完整真实时间戳时才有同名 SRT 字幕 |
 | 笔记保存位置 | 按课程整理的 Markdown 笔记、TXT 转录原文 |
 | 各目录的隐藏 `.icourse` | 校验记录、恢复缓存、旧笔记历史；不包含 API Key |
+
+默认星辰接口实测返回纯文字，没有时间戳，所以生成 TXT 和笔记，不伪造字幕。长音频分块转录后合并为整课，成功块保存在 Application Support 的 `asr-cache` 中，重试时复用。
 
 每个课次只有一份当前正式笔记，不再生成可见的分章草稿或核对意见。再次运行会复用已完成产物。只想重写笔记时，选择“为本地课程生成笔记”，勾选“只重新生成笔记（复用已有转录）”。
 

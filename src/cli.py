@@ -2,11 +2,10 @@
 
 import argparse
 import importlib.metadata
-import importlib.util
 import json
 import platform
 import sys
-from dataclasses import asdict, replace
+from dataclasses import replace
 from pathlib import Path
 
 from . import task_events as events
@@ -32,13 +31,11 @@ def doctor():
             errors.append(str(exc))
     try:
         settings = ASRSettings.from_env()
-        report["asr"] = asdict(settings)
-        package = "mlx_whisper" if settings.backend == "mlx" else "faster_whisper"
-        if importlib.util.find_spec(package) is None:
-            errors.append(f"缺少 {package}；请运行安装脚本。")
+        report["asr"] = settings.public_dict()
+        report["asr"]["key_configured"] = bool(settings.api_key)
     except ValueError as exc:
         errors.append(str(exc))
-    for package in ("mlx", "mlx-whisper", "faster-whisper", "PySide6"):
+    for package in ("fudan-icourse-subscriber", "requests", "PySide6"):
         try:
             report[package] = importlib.metadata.version(package)
         except importlib.metadata.PackageNotFoundError:
@@ -51,15 +48,8 @@ def doctor():
 
 def _settings(args):
     settings = ASRSettings.from_env()
-    values = {}
-    if args.backend:
-        values["backend"] = args.backend
-        if args.backend == "cpu" and settings.model.startswith("mlx-community/"):
-            values.update(model="large-v3-turbo", revision="", compute_type="auto")
-    if args.model:
-        values.update(model=args.model, revision="")
-    if args.revision:
-        values["revision"] = args.revision
+    values = {field: getattr(args, field) for field in ("base_url", "model", "response_format")
+              if getattr(args, field) is not None}
     return replace(settings, **values).resolved()
 
 
@@ -73,16 +63,17 @@ def main(argv=None):
             return run()
         finally:
             sys.argv = saved
-    parser = argparse.ArgumentParser(description="iCourse：Mac 本地转录与课程下载")
+    parser = argparse.ArgumentParser(description="iCourse：课程下载与云端转录")
     commands = parser.add_subparsers(dest="command", required=True)
     commands.add_parser("doctor", help="检查运行环境（不登录、不调用云模型）")
     commands.add_parser("gui", help="打开 Mac 界面")
     commands.add_parser("run", help="运行课程流水线；run --help 查看参数")
-    for name in ("prepare-model", "transcribe"):
+    for name in ("check-asr", "transcribe"):
         command = commands.add_parser(name)
-        command.add_argument("--backend", choices=["auto", "mlx", "cpu", "cuda"])
+        command.add_argument("--base-url")
         command.add_argument("--model")
-        command.add_argument("--revision")
+        command.add_argument("--env-file", type=Path, help="读取指定配置；默认只使用环境变量")
+        command.add_argument("--response-format", choices=["json", "verbose_json", "text", "srt"])
         if name == "transcribe":
             command.add_argument("media", type=Path)
             command.add_argument("--output-dir", type=Path)
@@ -96,14 +87,17 @@ def main(argv=None):
         if args.command == "gui":
             from .mac_gui import main as gui
             return gui()
+        if args.env_file:
+            from .pipeline import _load_env_file
+            _load_env_file(args.env_file.expanduser().resolve(strict=True))
         settings = _settings(args)
-        if args.command == "prepare-model":
-            events.progress("正在准备转录模型，首次使用可能需要下载")
-            from .asr.client import ASRWorker
-            worker = ASRWorker(settings)
+        if args.command == "check-asr":
+            events.progress("正在检查语音连接（不上传音频）")
+            from .asr.client import CloudWorker
+            worker = CloudWorker(settings)
             try:
-                result = worker.request(progress=lambda e: print(json.dumps(e, ensure_ascii=False), flush=True))
-                print(json.dumps(result, ensure_ascii=False))
+                result = worker.request(progress=lambda e: print(e.get("message", ""), flush=True))
+                print(result["message"])
             finally:
                 worker.close()
             return 0
@@ -133,12 +127,15 @@ def main(argv=None):
         with Transcriber(settings) as transcriber:
             result = transcriber.transcribe_result(str(media), title=media.stem)
             text_path, srt_path = output / (stem + ".txt"), output / (stem + ".srt")
+            if not result.complete or not result.text.strip():
+                raise RuntimeError("转录不完整或为空，不会标为完成。")
             atomic_write_text(text_path, result.text + "\n")
-            transcriber.write_srt(srt_path)
+            subtitle_count = transcriber.write_srt(srt_path)
+            outputs = [text_path, srt_path] if subtitle_count else [text_path]
             # Metadata is the commit marker, written after all artifacts.
             atomic_write_json(metadata_path, {
                 **result.to_dict(), "source": str(media), "source_sha256": identity,
-                "artifacts": {p.name: file_sha256(p) for p in (text_path, srt_path)},
+                "artifacts": {p.name: file_sha256(p) for p in outputs},
             })
         print(f"转录已保存：{text_path}")
         events.stage(task, "tr", "done", path=str(text_path))

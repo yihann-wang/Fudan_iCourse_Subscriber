@@ -27,12 +27,12 @@ def test_secrets_never_written_to_preferences(tmp_path):
     fake_password = uuid4().hex
     fake_api_key = uuid4().hex
     values = defaults()
-    values.update(uis_psw=fake_password, llm_api_key_1=fake_api_key)
+    values.update(uis_psw=fake_password, llm_api_key_1=fake_api_key, asr_api_key=uuid4().hex)
     store.save(values)
     text = path.read_text()
-    assert fake_password not in text and fake_api_key not in text
+    assert all(values[field] not in text for field in SECRET_FIELDS)
     assert all(field not in json.loads(text) for field in SECRET_FIELDS)
-    assert store.load()["uis_psw"] == values["uis_psw"]
+    assert all(store.load()[field] == values[field] for field in SECRET_FIELDS)
     assert path.stat().st_mode & 0o777 == 0o600
 
 
@@ -60,7 +60,8 @@ def test_gui_environment_is_isolated_and_explicit():
     base = {"LLM_API_KEY_2": "unrelated", "WHISPER_DEVICE": "cuda", "PATH": "/bin"}
     env = runtime_environment(defaults(), base)
     assert "LLM_API_KEY_2" not in env and "WHISPER_DEVICE" not in env
-    assert env["ASR_BACKEND"] == "auto" and env["PATH"] == "/bin"
+    assert "ASR_BACKEND" not in env and env["ASR_MODEL"] == defaults()["asr_model"]
+    assert env["PATH"] == "/bin"
     assert base["WHISPER_DEVICE"] == "cuda"
 
 

@@ -1254,9 +1254,6 @@ def _run_main() -> int:
         env_file = requested_env_file.resolve()
     print(f"[Env] Loading env file: {env_file}")
     _load_env_file(env_file)
-    from src.asr import ASRSettings
-    asr_settings = ASRSettings.from_env()
-    print(f"[Env] ASR: {asr_settings.backend} model={asr_settings.model}")
 
     if str(PROJECT_ROOT) not in sys.path:
         sys.path.insert(0, str(PROJECT_ROOT))
@@ -1316,14 +1313,14 @@ def _run_main() -> int:
     events.emit("phase", message="正在检查保存目录")
     check_pipeline_storage(out_dir, summary_dir, mode=mode, list_only=args.list_only)
 
-    # One persistent model process per pipeline, created only if needed.
+    # One lightweight network process per pipeline, created only if needed.
     _transcriber_lock = threading.Lock()
     _transcriber_holder: dict = {}
 
     def _transcriber_factory():
         with _transcriber_lock:
             if "instance" not in _transcriber_holder:
-                _log("    [init] loading transcriber...")
+                _log("    [init] preparing cloud transcription...")
                 from src.transcriber import Transcriber  # pylint: disable=import-error
                 _transcriber_holder["instance"] = Transcriber()
             return _transcriber_holder["instance"]

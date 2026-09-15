@@ -2,7 +2,7 @@
 
 本仓库派生自 [LeafCreeper/Fudan_iCourse_Subscriber](https://github.com/LeafCreeper/Fudan_iCourse_Subscriber)。原作者及其他贡献者的工作和提交历史予以保留。
 
-Mac 版是在早期代码基础上实现的独立桌面分支：新增 Apple Silicon / MLX 转录、Qt 桌面界面、钥匙串设置、分离存储、可恢复流水线和整课一次总结。它不是上游 V2 的完整移植；PPT OCR、网页数据库与 GitHub Actions 定时订阅不属于此版功能。
+Mac 版是在早期代码基础上实现的独立桌面分支：新增可配置的云端语音转录（0.5.0 起替代原本地转录）、Qt 桌面界面、钥匙串设置、分离存储、可恢复流水线和整课一次总结。它不是上游 V2 的完整移植；PPT OCR、网页数据库与 GitHub Actions 定时订阅不属于此版功能。
 
 整理前的远端主分支保留在 `upstream-before-macos-20260909` 标签，对应提交 `5492d55`。原版说明和实现可通过 Git 历史或该标签查看。主分支不再包含旧云端任务工作流、网页端和未使用的字体二进制；Git 历史未重写。
 

@@ -4,7 +4,7 @@
 
 支持 Apple Silicon M 系列、macOS 14.0+。在 **Apple menu → About This Mac** 查看芯片与系统版本。Terminal 不要以 Rosetta 模式运行。
 
-需要网络安装依赖和转录模型。请给内置磁盘留出数 GB 空间存放 Python、依赖和模型；课程视频的空间另算，可使用外置磁盘。实际占用随模型和依赖版本变化。
+需要网络安装依赖并调用语音服务。请为 Python、界面依赖和临时音频预留空间；不再下载本地语音模型。临时音频约每小时 115 MB，任务结束后清理。视频可使用外置磁盘。
 
 从 [Homebrew 官网](https://brew.sh/)按说明安装 Homebrew，并完成它提示的 shell 设置，然后执行：
 
@@ -38,14 +38,14 @@ zsh "安装 Mac.command"
 
 ## 首次配置
 
-1. 在 App 的“设置”页输入自己的 UIS 账号和笔记 API 配置，点击“保存设置”。
+1. 在 App 的“设置”页输入自己的 UIS 账号、语音 API 和笔记 API 配置，点击“保存设置”。
 2. 点击“检查环境”；这一步不登录学校，也不调用笔记 API。
-3. 点击“准备转录模型”。默认模型从 Hugging Face 下载；也可等第一次转录时自动下载。
+3. 点击“检查语音连接”：读取服务商模型列表，不上传音频。列表包含模型不保证每种参数都可用，先转录一个短文件确认。
 4. 在“任务”页选择保存目录，然后到“设置”页点击“保存设置”；填写课程 ID，开始任务。首次访问受保护目录时，按系统提示点击 **Allow**。详细示例见[使用说明](usage.md)。
 
 已保存的目录会在下次打开时恢复。0.3.2 起 App 使用原生入口，普通退出、重开会保持同一个 App 身份；无需每次重新选择文件夹。系统拒绝过访问、重装或重建 App 后，可能需要重新授权，详见[磁盘访问问题](troubleshooting.md#外置磁盘或-documents-没有访问权限)。
 
-“本地转录”保持自动即可。安装的 CPU 后端可作为备用，但转录速度取决于硬件。模型缓存完成后，本地转录可以离线；下载课程和调用在线笔记服务仍需要网络。
+旧版本地转录功能与依赖已移除。已有 TXT 和笔记仍可复用；新转录需要配置云端语音服务。详情见[云端转录](cloud-asr.md)。
 
 ## 外置硬盘保存视频
 
@@ -69,7 +69,7 @@ zsh "安装 Mac.command"
 | 任务状态 | `~/Library/Application Support/Fudan iCourse/` |
 | App 启动与运行日志 | `~/Library/Logs/Fudan iCourse Subscriber/application.log` |
 | uv 管理的 Python | 通常为 `~/.local/share/uv/python/` |
-| 模型缓存 | 通常为 `~/.cache/huggingface/hub/` |
+| 转录块缓存 | `~/Library/Application Support/Fudan iCourse Subscriber/asr-cache/` |
 
 `~` 代表自己的用户文件夹。以上隐藏路径可通过 Finder 的 **Go to Folder…** 打开。
 
@@ -94,4 +94,4 @@ ZIP 用户下载最新版并解压，运行新目录中的安装器。升级会�
 
 退出 App，在 Finder 删除 `~/Applications/iCourse.app` 和上述 `runtime` 文件夹即可移除程序主体。保留设置和课程文件，方便以后重新安装。若不再需要，可自行单独删除该项目的设置、任务状态和日志。
 
-模型缓存和 uv Python 可能被其他软件共用，不要整目录盲目删除。钥匙串凭据可在 **Keychain Access** 中搜索 `Fudan iCourse Subscriber`，确认条目属于本项目后自行移除。
+旧版 Hugging Face 模型缓存和 uv Python 可能被其他软件共用，升级不会删除这些共享目录。钥匙串凭据可在 **Keychain Access** 中搜索 `Fudan iCourse Subscriber`，确认条目属于本项目后自行移除。
