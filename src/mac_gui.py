@@ -17,6 +17,7 @@ from PySide6.QtWidgets import (
     QComboBox,
     QFileDialog,
     QFormLayout,
+    QFrame,
     QHBoxLayout,
     QLabel,
     QLineEdit,
@@ -25,6 +26,7 @@ from PySide6.QtWidgets import (
     QPushButton,
     QScrollArea,
     QSpinBox,
+    QSplitter,
     QTabWidget,
     QVBoxLayout,
     QWidget,
@@ -77,7 +79,13 @@ class MainWindow(QMainWindow):
         self.toggle_settings.setChecked(True)
         self.toggle_settings.toggled.connect(self.show_settings)
         layout.addWidget(self.toggle_settings)
-        layout.addWidget(self.tabs)
+        self.panes = QSplitter(Qt.Orientation.Vertical)
+        self.panes.setChildrenCollapsible(False)
+        self.panes.setHandleWidth(8)
+        self.panes.setStyleSheet("QSplitter::handle:vertical { background: palette(mid); margin: 2px 0; }")
+        self.panes.addWidget(self.tabs)
+        self.tabs.setMinimumHeight(240)
+        layout.addWidget(self.panes, 1)
         task = QWidget()
         form = QFormLayout(task)
         form.setFieldGrowthPolicy(QFormLayout.FieldGrowthPolicy.AllNonFixedFieldsGrow)
@@ -114,7 +122,6 @@ class MainWindow(QMainWindow):
         task_scroll.setWidgetResizable(True)
         task_scroll.setWidget(task)
         self.tabs.addTab(task_scroll, "任务")
-        self.tabs.setMaximumHeight(390)
 
         settings = QWidget()
         config = QFormLayout(settings)
@@ -173,7 +180,17 @@ class MainWindow(QMainWindow):
         log_dir = Path.home() / "Library/Logs/Fudan iCourse Subscriber" if preferences is None and initial_values is None else None
         self.panel = TaskPanel(self, log_dir=log_dir)
         self.status, self.progress, self.log = self.panel.status, self.panel.progress, self.panel.log
-        layout.addWidget(self.panel, 1)
+        self.panel.set_compact(True)
+        self.progress_scroll = QScrollArea()
+        self.progress_scroll.setWidgetResizable(True)
+        self.progress_scroll.setFrameShape(QFrame.Shape.NoFrame)
+        self.progress_scroll.setWidget(self.panel)
+        self.progress_scroll.setMinimumHeight(90)
+        self.panes.addWidget(self.progress_scroll)
+        self.panes.setStretchFactor(0, 1)
+        self.panes.setStretchFactor(1, 0)
+        self.panes.setSizes([620, 90])
+        self.panes.handle(1).setToolTip("上下拖动，调整任务设置和进度区域的高度")
         actions = QHBoxLayout()
         self.start = QPushButton("开始任务")
         self.start.setDefault(True)
@@ -197,6 +214,10 @@ class MainWindow(QMainWindow):
     def show_settings(self, checked):
         self.tabs.setVisible(checked)
         self.toggle_settings.setText("收起任务设置" if checked else "展开任务设置")
+        if checked and hasattr(self, "panel"):
+            height = max(400, self.panes.height())
+            progress_height = 90 if self.panel.model is None else int(height * 0.4)
+            self.panes.setSizes([height - progress_height, progress_height])
 
     def add_text(self, form, name, label, placeholder="", secret=False):
         field = QLineEdit(str(self.values.get(name, "")))
