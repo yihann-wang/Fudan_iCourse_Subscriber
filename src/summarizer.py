@@ -13,10 +13,12 @@ from . import config
 from .artifacts import atomic_write_json
 from .summary_errors import EmptySummaryResponseError, TruncatedSummaryError
 from .summary_result import SummaryResult
-from .summary_storage import archive_copy
 from .summary_settings import (
-    DEFAULT_OUTPUT_TOKENS, DEFAULT_TIMEOUT_MINUTES, WORKFLOW_VERSION,
+    DEFAULT_OUTPUT_TOKENS,
+    DEFAULT_TIMEOUT_MINUTES,
+    WORKFLOW_VERSION,
 )
+from .summary_storage import archive_copy
 
 SYSTEM_PROMPT = r"""你是一个专业的课程助教。你的任务是根据用户提供的课程录音文本，生成用于学生自学和期末复习的详细笔记。
 1. **直接输出**：不要包含任何"好的"、"没问题"、"以下是总结"等客套话，不要输出全局课程名称大标题（由系统自动生成），直接开始总结即可。
@@ -294,6 +296,9 @@ class Summarizer:
         max_attempts = len(self._RETRY_WAITS) + 1
         last_exc: Exception | None = None
         for attempt in range(1, max_attempts + 1):
+            from . import task_events as events
+            events.progress("等待笔记服务返回", phase="request", model=model, provider=provider["name"],
+                            attempt=attempt, max_attempts=max_attempts, input_chars=len(content))
             try:
                 if provider["api_style"] == "anthropic":
                     return self._call_anthropic_llm(provider, model, title, content, **options)
@@ -308,6 +313,8 @@ class Summarizer:
                         f"（{reason}），{wait} 秒后重试当前步骤。",
                         flush=True,
                     )
+                    events.progress("请求未成功，等待重试", phase="retry", model=model, provider=provider["name"],
+                                    attempt=attempt, max_attempts=max_attempts, retry_seconds=wait, reason=reason)
                     time.sleep(wait)
                     continue
                 raise
@@ -332,6 +339,8 @@ class Summarizer:
         identity = self._checkpoint_identity(title, content)
 
         def report(message):
+            from . import task_events as events
+            events.progress(message, phase="preparing", input_chars=len(content))
             print(f"[Summarizer] {message}", flush=True)
             if progress:
                 progress(message)

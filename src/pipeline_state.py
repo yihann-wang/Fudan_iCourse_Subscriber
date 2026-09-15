@@ -15,14 +15,14 @@ from .artifacts import atomic_write_json, cached_file_sha256, file_sha256, inter
 
 
 class PipelineState:
-    def __init__(self, path):
+    def __init__(self, path, run_id=None):
         Path(path).parent.mkdir(parents=True, exist_ok=True)
         self.connection = sqlite3.connect(path, timeout=30, check_same_thread=False)
         self.connection.row_factory = sqlite3.Row
         self.connection.execute("PRAGMA journal_mode=WAL")
         self.connection.execute("PRAGMA busy_timeout=30000")
         self.condition = threading.Condition()
-        self.run_id = uuid.uuid4().hex
+        self.run_id = run_id or uuid.uuid4().hex
         self.connection.executescript("""
             CREATE TABLE IF NOT EXISTS pipeline_jobs (
                 id INTEGER PRIMARY KEY, run_id TEXT NOT NULL, stage TEXT NOT NULL,

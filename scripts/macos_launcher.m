@@ -41,6 +41,16 @@ int main(int argc, char **argv) {
                 return fail(@"无法创建 App 日志目录。", NO);
             }
             NSString *log = [logs stringByAppendingPathComponent:@"application.log"];
+            // This captures startup/Qt diagnostics only; task logs rotate in Python.
+            NSFileManager *files = [NSFileManager defaultManager];
+            NSDictionary *attributes = [files attributesOfItemAtPath:log error:nil];
+            if ([attributes[NSFileSize] unsignedLongLongValue] >= 2000000) {
+                NSString *previous = [log stringByAppendingString:@".1"];
+                [files removeItemAtPath:previous error:nil];
+                if (![files moveItemAtPath:log toPath:previous error:nil]) {
+                    [files removeItemAtPath:log error:nil];
+                }
+            }
             if (!freopen(log.fileSystemRepresentation, "a", stdout) || dup2(fileno(stdout), STDERR_FILENO) < 0) {
                 return fail(@"无法打开 App 日志。", NO);
             }

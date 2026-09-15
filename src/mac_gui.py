@@ -6,6 +6,7 @@ import os
 import re
 import signal
 import sys
+import uuid
 from pathlib import Path
 
 from PySide6.QtCore import QProcess, QProcessEnvironment, Qt, QTimer, QUrl
@@ -21,8 +22,6 @@ from PySide6.QtWidgets import (
     QLineEdit,
     QMainWindow,
     QMessageBox,
-    QPlainTextEdit,
-    QProgressBar,
     QPushButton,
     QScrollArea,
     QSpinBox,
@@ -34,6 +33,8 @@ from PySide6.QtWidgets import (
 from .preferences import SECRET_FIELDS, Preferences, defaults, runtime_environment
 from .storage_access import StorageAccessError, check_directory, check_pipeline_storage
 from .summary_settings import DEFAULT_OUTPUT_TOKENS, DEFAULT_TIMEOUT_MINUTES
+from .task_events import redact, set_secrets
+from .task_panel import TaskPanel
 
 ROOT = Path(__file__).resolve().parent.parent
 
@@ -44,18 +45,25 @@ class MainWindow(QMainWindow):
         self.preferences = preferences or Preferences()
         self.values = initial_values if initial_values is not None else self.preferences.load(ROOT / ".icourse_gui_config.json")
         self.process = QProcess(self)
-        self.process.setProcessChannelMode(QProcess.ProcessChannelMode.MergedChannels)
+        self.process.setProcessChannelMode(QProcess.ProcessChannelMode.SeparateChannels)
         self.process.readyReadStandardOutput.connect(self.read_output)
+        self.process.readyReadStandardError.connect(self.read_error)
         self.process.finished.connect(self.finished)
         self.process.errorOccurred.connect(self.process_error)
+        self.process.started.connect(lambda: setattr(self, "engine_pid", int(self.process.processId())))
+        self.engine_pid = None
         self.buffer = ""
         self.decoder = codecs.getincrementaldecoder("utf-8")("replace")
+        self.error_buffer = ""
+        self.error_decoder = codecs.getincrementaldecoder("utf-8")("replace")
+        self.exit_result = None
+        self.run_values = None
         self.cancelled = False
         self.group_pid = None
         self.closing = False
         self.fields = {}
         self.setWindowTitle("iCourse · 课程与笔记")
-        self.resize(940, 790)
+        self.resize(1060, 850)
         central = QWidget()
         layout = QVBoxLayout(central)
         title = QLabel("iCourse 课程助手")
@@ -64,6 +72,11 @@ class MainWindow(QMainWindow):
         subtitle = QLabel("下载课程录像，在这台 Mac 上转录，生成字幕与学习笔记。")
         layout.addWidget(subtitle)
         self.tabs = QTabWidget()
+        self.toggle_settings = QPushButton("收起任务设置")
+        self.toggle_settings.setCheckable(True)
+        self.toggle_settings.setChecked(True)
+        self.toggle_settings.toggled.connect(self.show_settings)
+        layout.addWidget(self.toggle_settings)
         layout.addWidget(self.tabs)
         task = QWidget()
         form = QFormLayout(task)
@@ -97,7 +110,11 @@ class MainWindow(QMainWindow):
         self.awake.setChecked(bool(self.values.get("keep_awake", True)))
         self.fields["keep_awake"] = self.awake
         form.addRow("", self.awake)
-        self.tabs.addTab(task, "任务")
+        task_scroll = QScrollArea()
+        task_scroll.setWidgetResizable(True)
+        task_scroll.setWidget(task)
+        self.tabs.addTab(task_scroll, "任务")
+        self.tabs.setMaximumHeight(390)
 
         settings = QWidget()
         config = QFormLayout(settings)
@@ -153,32 +170,33 @@ class MainWindow(QMainWindow):
         settings_scroll.setWidget(settings)
         self.tabs.addTab(settings_scroll, "设置")
 
-        self.status = QLabel("就绪 · Apple Silicon 使用本机 GPU 转录")
-        layout.addWidget(self.status)
-        self.progress = QProgressBar()
-        self.progress.setRange(0, 100)
-        self.progress.setValue(0)
-        layout.addWidget(self.progress)
-        self.log = QPlainTextEdit()
-        self.log.setReadOnly(True)
-        self.log.setMaximumBlockCount(2000)
-        self.log.setPlaceholderText("运行状态会显示在这里。")
-        layout.addWidget(self.log, 1)
+        log_dir = Path.home() / "Library/Logs/Fudan iCourse Subscriber" if preferences is None and initial_values is None else None
+        self.panel = TaskPanel(self, log_dir=log_dir)
+        self.status, self.progress, self.log = self.panel.status, self.panel.progress, self.panel.log
+        layout.addWidget(self.panel, 1)
         actions = QHBoxLayout()
         self.start = QPushButton("开始任务")
         self.start.setDefault(True)
         self.start.clicked.connect(lambda: self.launch("task"))
-        self.stop = QPushButton("取消")
+        self.stop = QPushButton("停止任务")
         self.stop.setEnabled(False)
         self.stop.clicked.connect(self.cancel)
         open_folder = QPushButton("打开保存位置")
         open_folder.clicked.connect(self.open_output)
         actions.addWidget(open_folder)
+        self.retry = QPushButton("仅重试失败课次")
+        self.retry.setEnabled(False)
+        self.retry.clicked.connect(self.retry_failed)
+        actions.addWidget(self.retry)
         actions.addStretch()
         actions.addWidget(self.stop)
         actions.addWidget(self.start)
         layout.addLayout(actions)
         self.setCentralWidget(central)
+
+    def show_settings(self, checked):
+        self.tabs.setVisible(checked)
+        self.toggle_settings.setText("收起任务设置" if checked else "展开任务设置")
 
     def add_text(self, form, name, label, placeholder="", secret=False):
         field = QLineEdit(str(self.values.get(name, "")))
@@ -257,16 +275,27 @@ class MainWindow(QMainWindow):
             args.append("--redo-notes")
         return args
 
-    def launch(self, action):
-        if self.process.state() != QProcess.ProcessState.NotRunning:
+    def launch(self, action, retry_tasks=None):
+        if self.process.state() != QProcess.ProcessState.NotRunning or self.group_pid:
             return
         try:
             values = self.collect()
+            if retry_tasks and self.run_values:
+                # Preserve the run's input/output selection, but allow corrected credentials/models.
+                for key in ("mode", "out_dir", "summary_dir", "local_media"):
+                    values[key] = self.run_values[key]
+                values.update(course_ids=",".join(dict.fromkeys(t.course_id for t in retry_tasks)),
+                              sub_ids="", skip_time_periods="", overwrite=False, redo_notes=False)
             if action == "task":
                 for name in ("out_dir", "summary_dir"):
                     path = Path(values[name] or defaults()[name]).expanduser()
                     values[name] = str((path if path.is_absolute() else ROOT / path).resolve())
             args = self.command(action, values)
+            if retry_tasks and values["mode"] != "local_asr":
+                for task in retry_tasks:
+                    stage = next(name for name, state in task.stages.items() if state.status == "failed")
+                    args.extend(["--target", f"{task.course_id}:{task.sub_id}",
+                                 "--resume-stage", f"{task.course_id}:{task.sub_id}:{stage}"])
             env = runtime_environment(values)
             if action == "task":
                 # Request access in the native GUI process. The supervised worker
@@ -283,52 +312,95 @@ class MainWindow(QMainWindow):
             QMessageBox.information(self, "还需要填写", str(exc))
             return
         env["ICOURSE_KEEP_AWAKE"] = "1" if values["keep_awake"] else "0"
+        run_id = uuid.uuid4().hex
+        env.update(ICOURSE_EVENTS="json", ICOURSE_RUN_ID=run_id)
+        set_secrets([values.get(k) for k in SECRET_FIELDS] + [values.get("stu_id")])
         process_env = QProcessEnvironment()
         for key, value in env.items():
             process_env.insert(key, value)
         self.process.setProcessEnvironment(process_env)
         self.process.setWorkingDirectory(str(ROOT))
         self.cancelled = False
+        self.exit_result = None
+        self.engine_pid = None
+        self.run_values = dict(values)
         self.buffer = ""
+        self.error_buffer = ""
         self.decoder.reset()
-        self.log.clear()
-        self.progress.setRange(0, 0)
-        self.status.setText("正在启动…")
+        self.error_decoder.reset()
+        self.panel.begin(run_id)
+        self.toggle_settings.setChecked(False)
+        self.tabs.setEnabled(False)
         self.start.setEnabled(False)
         self.stop.setEnabled(True)
+        self.retry.setEnabled(False)
         self.process.start(sys.executable, ["-m", "src.engine", *args])
+
+    def retry_failed(self):
+        if self.panel.model:
+            tasks = [t for t in self.panel.model.tasks.values() if t.outcome == "failed"]
+            if tasks:
+                self.launch("task", retry_tasks=tasks)
 
     def read_output(self):
         self.buffer += self.decoder.decode(bytes(self.process.readAllStandardOutput()))
         while "\n" in self.buffer:
             line, self.buffer = self.buffer.split("\n", 1)
             self.handle_line(line.rstrip())
+        if len(self.buffer) > 65536:
+            self.panel.diagnostic("忽略超长的非标准输出。")
+            self.buffer = ""
+
+    def read_error(self):
+        self.error_buffer += self.error_decoder.decode(bytes(self.process.readAllStandardError()))
+        self.error_buffer = self.error_buffer.replace("\r", "\n")
+        while "\n" in self.error_buffer:
+            line, self.error_buffer = self.error_buffer.split("\n", 1)
+            self.panel.diagnostic(line)
+        if len(self.error_buffer) > 16000:
+            self.panel.diagnostic(self.error_buffer[:16000])
+            self.error_buffer = ""
 
     def handle_line(self, line):
         try:
             event = json.loads(line)
         except ValueError:
             event = None
-        if isinstance(event, dict) and event.get("event") == "stage":
-            stage = {"dl": "下载", "tr": "转录", "sm": "生成笔记"}.get(event["stage"], event["stage"])
-            status = {"running": "处理中", "done": "完成", "failed": "失败", "pending": "等待回放"}.get(event["status"], event["status"])
-            self.status.setText(f"{stage} · {event['title']} · {status}")
-            self.log.appendPlainText(f"{stage} · {event['title']} · {status} {event.get('message', '')}")
+        if isinstance(event, dict) and event.get("event") == "icourse":
+            # Redact every string even if an older engine did not sanitize it.
+            event = self.sanitize_event(event)
+            self.panel.apply_event(event)
             return
         line = re.sub(r"^\[(?:PROG|PFIN):[^]]+\]\s*", "", line)
         if line:
-            self.log.appendPlainText(line)
-            if len(line) < 180:
-                self.status.setText(line)
+            self.panel.diagnostic(line)
+
+    @staticmethod
+    def sanitize_event(value):
+        if isinstance(value, str):
+            return redact(value)
+        if isinstance(value, dict):
+            return {k: MainWindow.sanitize_event(v) for k, v in value.items()}
+        if isinstance(value, list):
+            return [MainWindow.sanitize_event(v) for v in value]
+        return value
 
     def process_error(self, error):
         if error == QProcess.ProcessError.FailedToStart:
-            self.log.appendPlainText("无法启动运行环境，请重新运行安装脚本。")
+            self.panel.diagnostic("无法启动运行环境，请重新运行安装脚本。")
+            if self.panel.model:
+                self.panel.model.final = "failed"
+                self.panel.model.record({}, "无法启动运行环境，请重新运行安装脚本。")
             self.finished(1)
 
     def cancel(self):
+        if self.cancelled or self.process.state() == QProcess.ProcessState.NotRunning:
+            return
         self.cancelled = True
-        self.status.setText("正在停止任务…")
+        if self.panel.model:
+            self.panel.model.stopping = True
+            self.panel.render()
+        self.stop.setEnabled(False)
         pid = int(self.process.processId())
         self.group_pid = pid
         self.signal_group(pid, signal.SIGTERM)
@@ -348,27 +420,57 @@ class MainWindow(QMainWindow):
         if self.group_pid == pid:
             self.group_pid = None
         if self.process.state() == QProcess.ProcessState.NotRunning:
-            self.start.setEnabled(True)
+            self.complete_exit()
         if self.closing:
             self.close()
 
-    def finished(self, code, *_):
+    def finished(self, code, exit_status=QProcess.ExitStatus.NormalExit):
         self.read_output()
+        self.read_error()
         if self.buffer:
             self.handle_line(self.buffer)
             self.buffer = ""
-        self.start.setEnabled(not self.group_pid)
+        if self.error_buffer:
+            self.panel.diagnostic(self.error_buffer)
+            self.error_buffer = ""
+        self.exit_result = (code, exit_status == QProcess.ExitStatus.CrashExit)
         self.stop.setEnabled(False)
-        self.progress.setRange(0, 100)
-        self.progress.setValue(100 if code == 0 and not self.cancelled else 0)
-        self.status.setText("已取消；再次开始会复用已完成的结果" if self.cancelled else
-                            "任务完成" if code == 0 else "任务未全部完成，请查看上方原因")
+        if exit_status == QProcess.ExitStatus.CrashExit and self.engine_pid and not self.group_pid:
+            try:
+                os.killpg(self.engine_pid, 0)
+            except ProcessLookupError:
+                pass
+            else:
+                self.group_pid = self.engine_pid
+                self.signal_group(self.engine_pid, signal.SIGTERM)
+                QTimer.singleShot(2500, lambda pid=self.engine_pid: self.kill_remaining(pid))
+        if not self.group_pid:
+            self.complete_exit()
+
+    def complete_exit(self):
+        if self.exit_result is None:
+            return
+        code, crashed = self.exit_result
+        if self.panel.model and not self.panel.model.exited:
+            self.panel.model.finish(code, cancelled=self.cancelled, crashed=crashed)
+            self.panel.model.record({}, self.panel.model.heading)
+            self.panel.render()
+            self.retry.setEnabled(bool(self.panel.model.counts()["failed"]))
+            self.panel.save_result()
+        self.start.setEnabled(True)
+        self.tabs.setEnabled(True)
+        self.panel.close_log()
+        if self.closing:
+            self.close()
 
     def open_output(self):
         values = self.collect()
         folder = Path(values["out_dir"] if values["mode"] == "download" else values["summary_dir"])
-        folder.mkdir(parents=True, exist_ok=True)
-        QDesktopServices.openUrl(QUrl.fromLocalFile(str(folder)))
+        try:
+            check_directory(folder, "保存位置", writable=True, create=True)
+            QDesktopServices.openUrl(QUrl.fromLocalFile(str(folder)))
+        except (StorageAccessError, OSError) as exc:
+            QMessageBox.warning(self, "无法打开保存位置", str(exc))
 
     def closeEvent(self, event):
         if self.process.state() != QProcess.ProcessState.NotRunning or self.group_pid:
@@ -377,6 +479,7 @@ class MainWindow(QMainWindow):
                 self.cancel()
             event.ignore()
         else:
+            self.panel.close_log()
             event.accept()
 
 

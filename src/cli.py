@@ -9,7 +9,13 @@ import sys
 from dataclasses import asdict, replace
 from pathlib import Path
 
-from .artifacts import atomic_write_json, atomic_write_text, file_sha256, migrate_auxiliary
+from . import task_events as events
+from .artifacts import (
+    atomic_write_json,
+    atomic_write_text,
+    file_sha256,
+    migrate_auxiliary,
+)
 from .asr import ASRSettings
 from .storage_access import check_directory
 
@@ -82,14 +88,17 @@ def main(argv=None):
             command.add_argument("--output-dir", type=Path)
             command.add_argument("--overwrite", action="store_true")
     args = parser.parse_args(argv)
+    task = None
     try:
         if args.command == "doctor":
+            events.progress("正在检查本机运行环境")
             return doctor()
         if args.command == "gui":
             from .mac_gui import main as gui
             return gui()
         settings = _settings(args)
         if args.command == "prepare-model":
+            events.progress("正在准备转录模型，首次使用可能需要下载")
             from .asr.client import ASRWorker
             worker = ASRWorker(settings)
             try:
@@ -105,6 +114,8 @@ def main(argv=None):
         identity = file_sha256(media)
         stem = f"{media.stem}_{identity[:12]}"
         metadata_path = migrate_auxiliary(output / (stem + ".json"))
+        task = dict(course_id="local", course_title="本地音视频", sub_id=identity[:12], sub_title=media.stem)
+        text_path, srt_path = output / (stem + ".txt"), output / (stem + ".srt")
         if metadata_path.exists() and not args.overwrite:
             saved = json.loads(metadata_path.read_text())
             outputs = saved.get("artifacts", {})
@@ -113,7 +124,12 @@ def main(argv=None):
                     all((output / name).is_file() and file_sha256(output / name) == digest
                         for name, digest in outputs.items())):
                 print(f"使用已验证的转录：{output / (stem + '.txt')}")
+                events.plan_task(task, dict(dl="cached", tr="cached", sm="na"), dl=media, tr=text_path)
+                events.emit("planned", total=1)
                 return 0
+        events.plan_task(task, dict(dl="cached", tr="queued", sm="na"), dl=media, tr=text_path)
+        events.emit("planned", total=1)
+        events.stage(task, "tr", "running")
         with Transcriber(settings) as transcriber:
             result = transcriber.transcribe_result(str(media), title=media.stem)
             text_path, srt_path = output / (stem + ".txt"), output / (stem + ".srt")
@@ -125,11 +141,16 @@ def main(argv=None):
                 "artifacts": {p.name: file_sha256(p) for p in (text_path, srt_path)},
             })
         print(f"转录已保存：{text_path}")
+        events.stage(task, "tr", "done", path=str(text_path))
         return 0
     except KeyboardInterrupt:
         print("任务已取消。", file=sys.stderr)
         return 130
     except Exception as exc:
+        if task:
+            events.stage(task, "tr", "failed", f"{type(exc).__name__}: {exc}")
+        else:
+            events.emit("phase", message=f"{type(exc).__name__}: {exc}")
         print(f"{type(exc).__name__}: {exc}", file=sys.stderr)
         return 1
 

@@ -1,4 +1,5 @@
 import io
+import json
 import sqlite3
 import wave
 import pytest
@@ -8,7 +9,7 @@ from src.pipeline import main
 from src.summary_result import SummaryResult
 
 
-def test_all_stages_same_title_and_cached_rerun(monkeypatch, tmp_path):
+def test_all_stages_same_title_and_cached_rerun(monkeypatch, tmp_path, capsys):
     from src.icourse import ICourseClient
     from src.summarizer import Summarizer
     from src.transcriber import Transcriber
@@ -62,9 +63,18 @@ def test_all_stages_same_title_and_cached_rerun(monkeypatch, tmp_path):
     monkeypatch.setenv("StuId", "test-user")
     monkeypatch.setenv("UISPsw", "test-password")
     monkeypatch.setenv("ICOURSE_STATE_DIR", str(tmp_path / "state"))
+    monkeypatch.setenv("ICOURSE_EVENTS", "json")
+    monkeypatch.delenv("ICOURSE_RUN_ID", raising=False)
     monkeypatch.setattr("sys.argv", ["icourse", "--mode", "download_and_summarize", "--course-ids", "12345",
                                     "--out-dir", str(tmp_path / "videos"), "--summary-dir", str(tmp_path / "notes"), "--sleep", "0"])
     assert main() == 0
+    from src.task_view_model import TaskViewModel
+    first_events = [json.loads(line) for line in capsys.readouterr().out.splitlines() if line.startswith('{"event": "icourse"')]
+    first_model = TaskViewModel(first_events[0]["run_id"])
+    for event in first_events:
+        first_model.apply(event)
+    first_model.finish(0)
+    assert first_model.counts()["success"] == 2 and first_model.total == 2
     assert calls == {"download": 2, "asr": 2, "summary": 2}
     assert len(list((tmp_path / "videos").rglob("*.mp4"))) == 2
     assert len(list((tmp_path / "videos").rglob("*.srt"))) == 2
@@ -73,6 +83,13 @@ def test_all_stages_same_title_and_cached_rerun(monkeypatch, tmp_path):
     monkeypatch.setenv("LLM_MAX_OUTPUT_TOKENS", "16384")
     monkeypatch.setenv("LLM_INPUT_CHAR_LIMIT", "4000")
     assert main() == 0
+    cached_events = [json.loads(line) for line in capsys.readouterr().out.splitlines() if line.startswith('{"event": "icourse"')]
+    cached_model = TaskViewModel(cached_events[0]["run_id"])
+    for event in cached_events:
+        cached_model.apply(event)
+    cached_model.finish(0)
+    assert cached_model.counts()["success"] == 2 and cached_model.total == 2
+    assert not any(e["kind"] == "stage" for e in cached_events)
     assert calls == {"download": 2, "asr": 2, "summary": 2}
     connection = sqlite3.connect(tmp_path / "state" / "pipeline.sqlite3")
     assert connection.execute("SELECT count(*) FROM pipeline_jobs WHERE sub_id IS NOT NULL AND status='done'").fetchone()[0] == 6
@@ -88,7 +105,8 @@ def test_owning_run_lock_rejects_second_pipeline(monkeypatch, tmp_path):
 
 @pytest.mark.parametrize("mode", ["summarize", "download_and_summarize"])
 @pytest.mark.parametrize("has_transcript", [True, False])
-def test_redo_notes_reuses_transcript_and_never_downloads_or_transcribes(mode, has_transcript, monkeypatch, tmp_path):
+@pytest.mark.parametrize("resume", [True, False])
+def test_redo_notes_reuses_transcript_and_never_downloads_or_transcribes(mode, has_transcript, resume, monkeypatch, tmp_path):
     from src.icourse import ICourseClient
     from src.summarizer import Summarizer
     from src.transcriber import Transcriber
@@ -116,7 +134,8 @@ def test_redo_notes_reuses_transcript_and_never_downloads_or_transcribes(mode, h
     monkeypatch.setenv("StuId", "test-user")
     monkeypatch.setenv("UISPsw", "test-password")
     monkeypatch.setenv("ICOURSE_STATE_DIR", str(tmp_path / "state"))
-    monkeypatch.setattr("sys.argv", ["icourse", "--mode", mode, "--course-ids", "12345", "--redo-notes",
+    flags = ["--target", "12345:123456", "--resume-stage", "12345:123456:sm"] if resume else ["--redo-notes"]
+    monkeypatch.setattr("sys.argv", ["icourse", "--mode", mode, "--course-ids", "12345", *flags,
         "--out-dir", str(tmp_path / "videos"), "--summary-dir", str(tmp_path / "notes"), "--sleep", "0"])
     expected_code = 0 if has_transcript else 1
     assert main() == expected_code

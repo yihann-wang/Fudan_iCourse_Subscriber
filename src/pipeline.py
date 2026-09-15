@@ -39,13 +39,23 @@ RAW_TXT_SUBDIR = "原始txt"
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
+from src import task_events as events
 from src.artifacts import (
-    atomic_write_json, atomic_write_text, internal_path, local_media_id,
-    migrate_auxiliary, migrate_course_metadata,
+    atomic_write_json,
+    atomic_write_text,
+    internal_path,
+    local_media_id,
+    migrate_auxiliary,
+    migrate_course_metadata,
 )
-from src.pipeline_state import PipelineState, artifact_metadata, mark_stage, valid_artifact
-from src.summary_storage import archive_legacy_review_exports, archive_previous_note
+from src.pipeline_state import (
+    PipelineState,
+    artifact_metadata,
+    mark_stage,
+    valid_artifact,
+)
 from src.storage_access import StorageAccessError, check_pipeline_storage, storage_error
+from src.summary_storage import archive_legacy_review_exports, archive_previous_note
 
 _STATE = None
 _TICK_KEY = "overall"
@@ -96,6 +106,8 @@ def _prog(key: str, message: str) -> None:
 
     Live ticks carry NO timestamp in GUI mode — they're transient.
     """
+    if events.enabled():
+        return  # Structured progress is rendered in place; never duplicate it.
     if _GUI_MODE:
         _log(f"[PROG:{key}] {message}")
     else:
@@ -109,6 +121,8 @@ def _prog_final(key: str, message: str) -> None:
     pinned-bottom active region into frozen history, timestamped. CLI: a plain
     timestamped append (no double timestamp).
     """
+    if events.enabled():
+        return
     if _GUI_MODE:
         _log(f"[PFIN:{key}] {_ts()} {message}")
     else:
@@ -756,6 +770,8 @@ def _download_video_with_progress(client, video_url: str, output_path: Path,
                     continue
                 elapsed = max(now - start, 1e-6)
                 avg_speed = downloaded / elapsed
+                events.progress("正在下载", phase="download", unit="bytes", completed=downloaded,
+                                total=total, speed=avg_speed)
 
                 if total > 0:
                     pct = downloaded * 100 / total
@@ -855,11 +871,8 @@ def _ticker_thread(counters: "_Counters", total: int,
 
 
 def _stage_event(task, stage, status, message=""):
-    if os.environ.get("ICOURSE_EVENTS") == "json":
-        import json
-        _log(json.dumps({"event": "stage", "course_id": task["course_id"],
-                         "sub_id": task["sub_id"], "title": task["sub_title"],
-                         "stage": stage, "status": status, "message": message}, ensure_ascii=False))
+    path_key = {"dl": "target_video_path", "tr": "target_transcript_path", "sm": "target_summary_path"}[stage]
+    events.stage(task, stage, status, message, path=str(task.get(path_key) or ""))
 
 
 def _task_tag(task: dict) -> str:
@@ -872,7 +885,7 @@ def _task_title(task: dict, max_len: int = 36) -> str:
 
 
 def _stage_failed(in_q, counters, task, stage, exc):
-    message = f"{type(exc).__name__}: {exc}"
+    message = events.redact(f"{type(exc).__name__}: {exc}")
     # Signed media URLs should never be written to logs or the task database.
     message = re.sub(r"https?://[^\s]+", "[URL]", message)
     mark_stage(in_q, "failed", message)
@@ -910,6 +923,8 @@ def _download_stage(in_q, out_q, client, sleep_sec, counters):
                             from src.icourse import ICourseClient
                             from src.webvpn import WebVPNSession
                             client = ICourseClient(_login_with_retry(WebVPNSession, max_attempts=2))
+                        events.progress("下载失败，等待重试", phase="retry", attempt=attempt + 1,
+                                        max_attempts=3, retry_seconds=2 ** attempt)
                         time.sleep(2 ** attempt)
                 if video_path is None:
                     mark_stage(in_q, "pending", "回放尚未发布")
@@ -999,8 +1014,9 @@ def _summarize_stage(in_q, summarizer, sleep_sec, counters,
                     while not watch_stop.wait(2):
                         _prog(f"sm:{task['sub_id']}", f"sm {_task_title(task)} · {segment_status} · {_format_eta(time.monotonic() - started)}")
 
-                watcher = threading.Thread(target=watch, daemon=True)
-                watcher.start()
+                if not events.enabled():
+                    watcher = threading.Thread(target=watch, daemon=True)
+                    watcher.start()
                 checkpoint = internal_path(task["target_summary_path"].with_suffix(".summary-progress.json"))
                 result = summarizer.summarize(
                     task["course_title"], transcript, checkpoint_path=checkpoint,
@@ -1010,6 +1026,7 @@ def _summarize_stage(in_q, summarizer, sleep_sec, counters,
                 if not summary.strip():
                     raise RuntimeError("摘要为空。")
                 path = task["target_summary_path"]
+                events.progress("正在保存笔记", phase="saving", model=model)
                 document = f"### {task['sub_title']}\n\n{summary.strip()}\n"
                 archive_previous_note(path, document)
                 _begin_artifact(path)
@@ -1082,6 +1099,24 @@ def _make_task(*, lec: dict, course_id: str, course_title: str,
     }
 
 
+def _announce_task(task, entry, mode, *, video=None, transcript=None, summary=None):
+    stages = dict(dl="cached" if video else "na", tr="cached" if transcript else "na", sm="na")
+    if mode != "download":
+        stages["sm"] = "cached" if summary else "waiting"
+    if entry:
+        names = ("dl", "tr", "sm") if mode != "download" else ("dl",)
+        for name in names[names.index(entry):]:
+            stages[name] = "queued" if name == entry else "waiting"
+    events.plan_task(task, stages, dl=video or task.get("target_video_path"),
+                     tr=transcript or task.get("target_transcript_path"),
+                     sm=summary or task.get("target_summary_path"))
+
+
+def _filter_targets(lectures, course_id, targets):
+    return list({str(lec["sub_id"]): lec for lec in lectures
+                 if not targets or (str(course_id), str(lec["sub_id"])) in targets}.values())
+
+
 def _build_parser(default_env_file: Path, default_out_dir: Path) -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description="Download iCourse playback videos to local files.",
@@ -1123,6 +1158,8 @@ def _build_parser(default_env_file: Path, default_out_dir: Path) -> argparse.Arg
         default="",
         help="Comma-separated lecture sub_id values. Empty means all playback lectures.",
     )
+    parser.add_argument("--target", action="append", default=[], metavar="COURSE:LECTURE",
+                        help="Restrict work to exact course/lecture pairs; may be repeated.")
     parser.add_argument(
         "--out-dir",
         default="",
@@ -1152,6 +1189,8 @@ def _build_parser(default_env_file: Path, default_out_dir: Path) -> argparse.Arg
             "Existing MP4 files are still reused and not re-downloaded."
         ),
     )
+    parser.add_argument("--resume-stage", action="append", default=[], metavar="COURSE:LECTURE:STAGE",
+                        help="Retry selected failures from dl, tr or sm, reusing earlier artifacts.")
     parser.add_argument("--redo-notes", action="store_true",
                         help="Regenerate notes using existing verified transcripts; never download or transcribe missing input.")
     parser.add_argument(
@@ -1226,7 +1265,22 @@ def _run_main() -> int:
     needs_download = mode in ("download", "download_and_summarize")
     needs_summary = mode in ("summarize", "download_and_summarize")
 
-    course_ids = _parse_csv(args.course_ids or os.environ.get("COURSE_IDS", ""))
+    course_ids = list(dict.fromkeys(_parse_csv(args.course_ids or os.environ.get("COURSE_IDS", ""))))
+    targets = set()
+    for value in args.target:
+        parts = value.split(":")
+        if len(parts) != 2 or not all(parts) or parts[0] not in course_ids:
+            raise ValueError("重试课次必须使用已选择的课程 ID 和课次 ID。")
+        targets.add(tuple(parts))
+    resume_stages = {}
+    for value in args.resume_stage:
+        parts = value.split(":")
+        if len(parts) != 3 or tuple(parts[:2]) not in targets or parts[2] not in {"dl", "tr", "sm"}:
+            raise ValueError("重试阶段必须属于本次选择的课次，且为 dl、tr 或 sm。")
+        if args.overwrite or args.redo_notes or (mode == "download" and parts[2] != "dl"):
+            raise ValueError("重试阶段与本次任务模式不兼容。")
+        resume_stages[tuple(parts[:2])] = parts[2]
+    seen_targets = set()
     sub_ids_filter = set(_parse_csv(args.sub_ids))
     skip_period_rules_raw = (
         args.skip_time_periods
@@ -1259,6 +1313,7 @@ def _run_main() -> int:
     summary_dir = summary_dir_path.resolve()
 
     # Fail before school login, downloads, model loading or paid note requests.
+    events.emit("phase", message="正在检查保存目录")
     check_pipeline_storage(out_dir, summary_dir, mode=mode, list_only=args.list_only)
 
     # One persistent model process per pipeline, created only if needed.
@@ -1296,6 +1351,7 @@ def _run_main() -> int:
         summarize_q = _stage_queue("summarize")
 
         for course_id in course_ids:
+            events.emit("phase", message=f"正在检查课程 {course_id} 的本地文件")
             print(f"\n[Course] {course_id}")
             _, video_scan_dirs = _resolve_course_dirs(out_dir, course_id, f"course_{course_id}")
             if not args.list_only:
@@ -1306,6 +1362,9 @@ def _run_main() -> int:
             selected, skipped_by_period = _apply_course_time_period_skip_rules(
                 course_id, local_lectures, skip_period_rules
             )
+            selected = _filter_targets(selected, course_id, targets)
+            seen_targets.update((course_id, str(lec["sub_id"])) for lec in selected)
+            events.emit("course", course_id=course_id, course_title=course_title, empty=not selected)
 
             print(f"  Title: {course_title}")
             print(f"  Local videos: {len(local_lectures)}")
@@ -1346,32 +1405,43 @@ def _run_main() -> int:
                 existing_summary_path = _find_file_for_lecture(summary_scan_dirs, sub_title, sub_id, ".md")
                 existing_transcript_path = _find_file_for_lecture(summary_scan_dirs, sub_title, sub_id, ".txt")
 
-                if not args.overwrite and not args.redo_notes and existing_summary_path is not None:
-                    _log(f"    [skip-summary] summary exists sub_id={sub_id}")
-                    counters.inc("summary_skipped")
-                    continue
-
+                resume = resume_stages.get((course_id, sub_id))
+                force_transcribe = args.overwrite or resume == "tr"
+                redo_notes = args.redo_notes or resume == "sm"
                 task = _make_task(
                     lec=lec, course_id=course_id, course_title=course_title,
-                    video_dir=None, notes_dir=notes_dir, raw_txt_dir=raw_txt_dir, overwrite=args.overwrite,
+                    video_dir=None, notes_dir=notes_dir, raw_txt_dir=raw_txt_dir, overwrite=force_transcribe,
                 )
 
-                if args.redo_notes:
+                if not force_transcribe and not redo_notes and existing_summary_path is not None:
+                    _log(f"    [skip-summary] summary exists sub_id={sub_id}")
+                    counters.inc("summary_skipped")
+                    _announce_task(task, None, mode, video=lec.get("local_path"),
+                                   transcript=existing_transcript_path, summary=existing_summary_path)
+                    continue
+
+                if redo_notes:
                     task["transcript_missing"] = existing_transcript_path is None
                     if existing_transcript_path is not None:
                         task["target_transcript_path"] = existing_transcript_path
+                    _announce_task(task, "sm", mode, video=lec.get("local_path"), transcript=existing_transcript_path)
                     summarize_q.put(task)
-                elif not args.overwrite and existing_transcript_path is not None:
+                elif not force_transcribe and existing_transcript_path is not None:
                     task["target_transcript_path"] = existing_transcript_path
+                    _announce_task(task, "sm", mode, video=lec.get("local_path"), transcript=existing_transcript_path)
                     summarize_q.put(task)
                 else:
+                    _announce_task(task, "tr", mode, video=lec.get("local_path"))
                     transcribe_q.put(task)
 
+        if targets - seen_targets:
+            raise ValueError("未找到指定课次：" + ", ".join(":".join(t) for t in sorted(targets - seen_targets)))
         if args.list_only:
             print(f"\n[Done] targets: {total_targets} (list-only)")
             return 0
 
         # 2-stage pipeline (no download): transcribe → summarize.
+        events.emit("planned", total=total_targets)
         transcribe_q.put(None)  # sentinel cascades to summarize_q
 
         pipeline_started_at = time.time()
@@ -1435,6 +1505,7 @@ def _run_main() -> int:
         print("No course IDs provided. Use --course-ids or set COURSE_IDS in .env.")
         return 1
 
+    events.emit("phase", message="正在登录学校并获取课程列表")
     vpn = _login_with_retry(WebVPNSession, max_attempts=max(1, args.login_retries))
     client = ICourseClient(vpn)
 
@@ -1456,6 +1527,7 @@ def _run_main() -> int:
     summarize_q = _stage_queue("summarize")
 
     for course_id in course_ids:
+        events.emit("phase", message=f"正在读取课程 {course_id}")
         print(f"\n[Course] {course_id}")
         detail = client.get_course_detail(course_id)
         course_title = detail.get("title", f"course_{course_id}")
@@ -1477,7 +1549,9 @@ def _run_main() -> int:
         selected, skipped_by_period = _apply_course_time_period_skip_rules(
             course_id, selected, skip_period_rules
         )
-        selected = sorted(selected, key=_sub_id_sort_key)
+        selected = sorted(_filter_targets(selected, course_id, targets), key=_sub_id_sort_key)
+        seen_targets.update((course_id, str(lec["sub_id"])) for lec in selected)
+        events.emit("course", course_id=course_id, course_title=course_title, empty=not selected)
         print(f"  Title: {course_title}")
         print(f"  Playback lectures: {len(playback_lectures)}")
         print(f"  Selected: {len(selected)}")
@@ -1536,24 +1610,29 @@ def _run_main() -> int:
             existing_summary_path = _find_file_for_lecture(summary_scan_dirs, sub_title, sub_id, ".md") if needs_summary else None
             existing_transcript_path = _find_file_for_lecture(summary_scan_dirs, sub_title, sub_id, ".txt") if needs_summary else None
 
-            if needs_summary and not args.overwrite and not args.redo_notes and existing_summary_path is not None:
+            resume = resume_stages.get((course_id, sub_id))
+            force_transcribe = args.overwrite or resume == "tr"
+            redo_notes = args.redo_notes or resume == "sm"
+            task = _make_task(
+                lec=lec, course_id=course_id, course_title=course_title,
+                video_dir=video_dir, notes_dir=notes_dir, raw_txt_dir=raw_txt_dir,
+                existing_video_path=existing_video_path, overwrite=force_transcribe,
+            )
+
+            if needs_summary and not force_transcribe and not redo_notes and existing_summary_path is not None:
                 _log(f"    [skip-summary] summary exists sub_id={sub_id}")
                 counters.inc("summary_skipped")
                 if needs_download and existing_video_path:
                     counters.inc("download_skipped")
+                _announce_task(task, None, mode, video=existing_video_path,
+                               transcript=existing_transcript_path, summary=existing_summary_path)
                 continue
 
-            task = _make_task(
-                lec=lec, course_id=course_id, course_title=course_title,
-                video_dir=video_dir, notes_dir=notes_dir, raw_txt_dir=raw_txt_dir,
-                existing_video_path=existing_video_path,
-                overwrite=args.overwrite,
-            )
-
-            if args.redo_notes:
+            if redo_notes:
                 task["transcript_missing"] = existing_transcript_path is None
                 if existing_transcript_path is not None:
                     task["target_transcript_path"] = existing_transcript_path
+                _announce_task(task, "sm", mode, video=existing_video_path, transcript=existing_transcript_path)
                 summarize_q.put(task)
                 if needs_download and existing_video_path:
                     counters.inc("download_skipped")
@@ -1562,10 +1641,11 @@ def _run_main() -> int:
             # Existing transcript → skip download + transcribe, straight to LLM
             if (
                 needs_summary
-                and not args.overwrite
+                and not force_transcribe
                 and existing_transcript_path is not None
             ):
                 task["target_transcript_path"] = existing_transcript_path
+                _announce_task(task, "sm", mode, video=existing_video_path, transcript=existing_transcript_path)
                 summarize_q.put(task)
                 if needs_download and existing_video_path:
                     counters.inc("download_skipped")
@@ -1575,22 +1655,28 @@ def _run_main() -> int:
             if existing_video_path:
                 _log(f"    [skip-download] already downloaded sub_id={sub_id}")
                 counters.inc("download_skipped")
+                _announce_task(task, "tr" if needs_summary else None, mode, video=existing_video_path)
                 if needs_summary:
                     transcribe_q.put(task)
                 continue
 
             # No existing artifacts → start from download stage (if mode allows)
             if needs_download:
+                _announce_task(task, "dl", mode)
                 download_q.put(task)
             elif needs_summary:
                 # mode=summarize with no local video — fail at transcribe stage
+                _announce_task(task, "tr", mode)
                 transcribe_q.put(task)
 
+    if targets - seen_targets:
+        raise ValueError("未找到指定课次：" + ", ".join(":".join(t) for t in sorted(targets - seen_targets)))
     if args.list_only:
         print(f"\n[Done] targets: {total_targets} (list-only)")
         return 0
 
     # Spawn 3 stage workers (each capped at 1 in-flight task). Sentinel flows:
+    events.emit("planned", total=total_targets)
     # download_q → transcribe_q → summarize_q.
     download_q.put(None)
 
@@ -1682,9 +1768,12 @@ def main() -> int:
     try:
         state_dir.mkdir(parents=True, exist_ok=True)
         with FileLock(state_dir / "pipeline.lock", timeout=0):
-            _STATE = PipelineState(state_dir / "pipeline.sqlite3")
+            _STATE = PipelineState(state_dir / "pipeline.sqlite3", run_id=os.environ.get("ICOURSE_RUN_ID"))
+            events.begin_run(_STATE.run_id)
             try:
-                return _run_main()
+                code = _run_main()
+                events.emit("run_finished", status="failed" if code else "done")
+                return code
             finally:
                 _STATE.close()
                 _STATE = None

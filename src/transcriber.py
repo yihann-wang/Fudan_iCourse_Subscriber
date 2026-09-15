@@ -5,6 +5,7 @@ import tempfile
 import time
 from pathlib import Path
 
+from . import task_events as events
 from .artifacts import atomic_write_text
 from .asr import ASRSettings, Segment, TranscriptionResult
 from .asr.client import ASRWorker
@@ -41,6 +42,8 @@ _GUI_MODE = os.environ.get("ICOURSE_GUI") == "1"
 
 def _prog(prog_key: str | None, message: str) -> None:
     """Refreshable progress line (GUI) or timestamped append (CLI)."""
+    if events.enabled():
+        return
     if _GUI_MODE and prog_key:
         print(f"[PROG:{prog_key}] {message}", flush=True)
     else:
@@ -138,15 +141,20 @@ class Transcriber:
 
         def report(event):
             if event["event"] == "loading":
+                events.progress("正在加载转录模型", phase="loading", backend=event.get("backend"), model=event.get("model"))
                 _prog(prog_key, f"{head} · 加载 {event['backend']} 模型…")
             elif event["event"] == "ready":
+                events.progress("模型就绪，准备转录", phase="ready")
                 _prog(prog_key, f"{head} · 模型就绪，开始转录…")
             elif event["event"] == "progress":
+                events.progress("正在转录", phase="transcribing", unit="seconds", completed=event["completed"],
+                                total=event["total"], backend=self.settings.backend)
                 pct = event["completed"] / event["total"] * 100
                 _prog(prog_key, f"{head} [{_bar(pct)}] {pct:.1f}% · "
                       f"{event['completed']:.0f}/{event['total']:.0f}s")
 
         with tempfile.TemporaryDirectory(prefix="icourse-audio-", dir=os.environ.get("ICOURSE_RUN_TEMP")) as tmp:
+            events.progress("正在准备音频", phase="decoding")
             _prog(prog_key, f"{head} · 解码音频…")
             audio = decode(input_only_cmd, Path(tmp) / "audio.wav", timeout=timeout,
                            cancel=self.cancel, source_duration=source_duration)

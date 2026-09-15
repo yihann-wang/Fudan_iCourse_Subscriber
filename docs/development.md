@@ -21,6 +21,8 @@ GitHub Actions 在 macOS 14、macOS 26 和 Linux 上检查锁定依赖、代码�
 | 路径 | 职责 |
 |---|---|
 | `src/mac_gui.py` | Qt 界面，启动同一 CLI 引擎 |
+| `src/task_events.py` | 有版本和顺序号的进度事件、凭据脱敏 |
+| `src/task_view_model.py`、`src/task_panel.py` | 课程 / 课次状态聚合、进度与诊断界面 |
 | `src/preferences.py` | 普通设置、钥匙串与任务环境 |
 | `src/cli.py`、`src/engine.py` | 命令入口、取消和保持唤醒 |
 | `src/pipeline.py`、`src/pipeline_state.py` | 下载 → 转录 → 笔记队列、SQLite 状态与锁 |
@@ -34,6 +36,12 @@ GitHub Actions 在 macOS 14、macOS 26 和 Linux 上检查锁定依赖、代码�
 | `main.py`、数据库/邮件相关模块与 `tools/` | 保留的旧接口；新入口优先使用 `src.cli` |
 
 每个阶段默认一个 worker，阶段之间可重叠工作。ASR 子进程复用模型，避免每课重新加载。取消会终止任务进程组；课程流水线互斥，安装器也检查同一把锁。
+
+桌面引擎使用 `ICOURSE_EVENTS=json` 和每次新建的 `ICOURSE_RUN_ID`。stdout 只传版本 1 的 JSON 行；普通输出重定向到 stderr，供诊断面板使用。事件中的 `seq` 由同一个锁按写入顺序递增，任务身份为 `(course_id, sub_id)`。下载和音频进度由同步工作线程的上下文带上身份，不依赖中文日志的措辞。GUI 忽略旧运行、重复事件和终态后的进度。
+
+`--target COURSE:LECTURE` 可重复指定精确目标；`--resume-stage COURSE:LECTURE:dl|tr|sm` 仅作用于已指定目标。失败笔记重试跳过旧正式笔记，但复用有效转录和完整响应缓存；失败转录重试会重新识别该课次。未找到显式目标会报错，不会误报成功。GUI 自己维护的最近一次摘要只是展示记录，不另建任务队列。
+
+离线测试还覆盖多课程同课次 ID、缓存运行的完整事件、十分钟进度不刷屏、失败重试、子进程停止、迟到事件、日志脱敏和滚动。Qt 测试使用默认配置和临时目录，不读取个人钥匙串。
 
 ## 不应回归的行为
 
