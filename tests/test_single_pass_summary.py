@@ -206,3 +206,11 @@ def test_one_visible_note_after_legacy_export_migration(factory, tmp_path):
     notes.unlink()
     assert _find_file_by_sub_id([tmp_path], "123456", ".md") is None
     assert _scan_summarized_sub_ids([tmp_path]) == set()
+
+
+def test_tiny_budget_rejected_before_billing_long_lecture(factory, tmp_path):
+    s, calls = factory()
+    s.max_output_tokens = 1024
+    with pytest.raises(ValueError, match='本次未调用笔记 API'):
+        s.summarize('课程', SOURCE, checkpoint_path=tmp_path/'progress.json')
+    assert calls == []

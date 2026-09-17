@@ -41,6 +41,16 @@ from .task_panel import TaskPanel
 ROOT = Path(__file__).resolve().parent.parent
 
 
+class ScrollSafeSpinBox(QSpinBox):
+    def wheelEvent(self, event):
+        event.ignore()  # Scroll the settings page; edit numbers by typing/arrows.
+
+
+class ScrollSafeComboBox(QComboBox):
+    def wheelEvent(self, event):
+        event.ignore()
+
+
 class MainWindow(QMainWindow):
     def __init__(self, preferences=None, initial_values=None):
         super().__init__()
@@ -91,7 +101,7 @@ class MainWindow(QMainWindow):
         form.setFieldGrowthPolicy(QFormLayout.FieldGrowthPolicy.AllNonFixedFieldsGrow)
         form.setFormAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignTop)
         form.setVerticalSpacing(12)
-        self.mode = QComboBox()
+        self.mode = ScrollSafeComboBox()
         for label, value in [("下载并生成笔记", "download_and_summarize"), ("只下载课程", "download"),
                              ("为本地课程生成笔记", "summarize"), ("转录一个本地文件", "local_asr")]:
             self.mode.addItem(label, value)
@@ -140,19 +150,22 @@ class MainWindow(QMainWindow):
             ("llm_output_tokens", "单次输出上限", DEFAULT_OUTPUT_TOKENS, 1024, 131072, 1024, " tokens"),
             ("llm_timeout_minutes", "单次请求最长等待", DEFAULT_TIMEOUT_MINUTES, 1, 60, 1, " 分钟"),
         ):
-            field = QSpinBox()
+            field = ScrollSafeSpinBox()
             field.setRange(low, high)
             field.setSingleStep(step)
             field.setSuffix(suffix)
             field.setValue(int(self.values.get(name, default)))
             self.fields[name] = field
             config.addRow(label, field)
+        reset_budget = QPushButton("恢复笔记推荐参数（65536 tokens / 20 分钟）")
+        reset_budget.clicked.connect(self.reset_note_budget)
+        config.addRow("", reset_budget)
         self.add_text(config, "asr_base_url", "语音服务地址", "OpenAI 兼容的音频上传接口，例如 https://api.siliconflow.cn/v1")
         self.add_text(config, "asr_model", "语音模型", "填写服务商提供的完整模型名称，可随时更换")
         self.add_text(config, "asr_api_key", "语音服务 API Key", secret=True)
         self.add_text(config, "asr_language", "语音语言（可选）", "默认留空；服务支持时可填 zh 或 en")
         self.add_text(config, "asr_prompt", "专业术语（可选）", "仅在语音服务支持 prompt 时填写")
-        response_format = QComboBox()
+        response_format = ScrollSafeComboBox()
         for label, value in [("服务默认（推荐）", ""), ("JSON 文本", "json"),
                              ("带时间戳 JSON", "verbose_json"), ("纯文本", "text"), ("SRT 字幕", "srt")]:
             response_format.addItem(label, value)
@@ -165,7 +178,7 @@ class MainWindow(QMainWindow):
             ("asr_timeout_seconds", "语音请求等待上限", 300, 10, 3600, " 秒"),
             ("asr_retries", "语音请求重试次数", 2, 0, 5, " 次"),
         ):
-            field = QSpinBox()
+            field = ScrollSafeSpinBox()
             field.setRange(low, high)
             field.setSuffix(suffix)
             field.setValue(int(self.values.get(name, default)))
@@ -278,6 +291,10 @@ class MainWindow(QMainWindow):
         except Exception as exc:
             QMessageBox.warning(self, "设置未保存", str(exc))
             return False
+
+    def reset_note_budget(self):
+        self.fields["llm_output_tokens"].setValue(DEFAULT_OUTPUT_TOKENS)
+        self.fields["llm_timeout_minutes"].setValue(DEFAULT_TIMEOUT_MINUTES)
 
     def command(self, action, values):
         if action != "task":

@@ -11,7 +11,12 @@ import time
 import uuid
 from pathlib import Path
 
-from .artifacts import atomic_write_json, cached_file_sha256, file_sha256, internal_path, migrate_auxiliary
+from .artifacts import (
+    atomic_write_json,
+    cached_file_sha256,
+    internal_path,
+    migrate_auxiliary,
+)
 
 
 class PipelineState:
@@ -106,9 +111,9 @@ def artifact_metadata(path, *, source=None, settings_fingerprint=None, **metadat
     path = Path(path)
     source = Path(source) if source else None
     atomic_write_json(migrate_auxiliary(path.with_suffix(path.suffix + ".icourse.json")), {
-        "schema": 1, "sha256": file_sha256(path),
+        "schema": 1, "sha256": cached_file_sha256(path),
         "source": str(source.resolve()) if source else None,
-        "source_sha256": file_sha256(source) if source else None,
+        "source_sha256": cached_file_sha256(source) if source else None,
         "settings_fingerprint": settings_fingerprint, **metadata,
     })
 
@@ -129,7 +134,10 @@ def valid_artifact(path):
         metadata = json.loads(marker.read_text(encoding="utf-8"))
         if metadata.get("status") == "needs_review":
             return False
-        if metadata["sha256"] != cached_file_sha256(path):
+        if path.suffix == ".md" and not path.read_text(encoding="utf-8").strip():
+            return False
+        if metadata["sha256"] != cached_file_sha256(path) and not (
+                path.suffix == ".md" and metadata.get("status") == "complete"):
             return False
         source = metadata.get("source")
         if source and (not Path(source).is_file() or cached_file_sha256(source) != metadata["source_sha256"]):

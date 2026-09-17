@@ -212,9 +212,12 @@ def test_silence_and_empty_service_response_are_not_completed_lectures(tmp_path,
         transcriber.transcribe_result(media)
     recording(media, seconds=1)
     monkeypatch.setattr(transcriber._worker, "request", lambda *a, **k: dict(text="", segments=[], language=""))
-    with pytest.raises(RuntimeError, match="空文本"):
+    with pytest.raises(RuntimeError, match="未识别到语音"):
         transcriber.transcribe_result(media)
     assert transcriber.last_result is None
+    assert not list((tmp_path / "cache").rglob("*.json"))
+    monkeypatch.setattr(transcriber._worker, "request", lambda *a, **k: dict(text="服务恢复后识别成功"))
+    assert transcriber.transcribe_result(media).text == "服务恢复后识别成功"
     transcriber.close()
 
 
@@ -224,3 +227,22 @@ def test_unsafe_service_addresses_are_rejected_without_echo(url):
     with pytest.raises(ValueError) as exc:
         ASRSettings(base_url=url).resolved()
     assert url not in str(exc.value)
+
+
+def test_empty_opening_continues_and_is_visible_and_cached(tmp_path, monkeypatch):
+    media = tmp_path / 'lecture.wav'
+    recording(media, seconds=65)
+    transcriber = Transcriber(ASRSettings(chunk_seconds=30), cache_dir=tmp_path / 'cache')
+    replies = iter([dict(text=''), dict(text='课堂正式开始'), dict(text='最后的内容')])
+    calls = []
+    def request(*args, **kwargs):
+        calls.append(1)
+        return next(replies)
+    monkeypatch.setattr(transcriber._worker, 'request', request)
+    result = transcriber.transcribe_result(media)
+    assert result.complete and '课堂正式开始' in result.text and '最后的内容' in result.text
+    assert '00:00:00,000–00:00:30,000 未识别到文字' in result.text
+    assert any('1 段音频未识别到文字' in w for w in result.warnings)
+    assert transcriber.transcribe_result(media).text == result.text
+    assert len(calls) == 3
+    transcriber.close()

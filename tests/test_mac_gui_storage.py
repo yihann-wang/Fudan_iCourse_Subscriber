@@ -63,3 +63,22 @@ def test_saved_paths_reappear_when_window_is_recreated(qt_app, tmp_path):
     assert second.fields["out_dir"].text() == str(tmp_path / "external videos")
     assert second.fields["summary_dir"].text() == str(tmp_path / "Documents" / "notes")
     second.close()
+
+
+def test_scrolling_settings_does_not_change_budget_or_model(qt_app):
+    from PySide6.QtCore import QPoint, QPointF, Qt
+    from PySide6.QtGui import QWheelEvent
+    window = mac_gui.MainWindow(initial_values=defaults())
+    for name in ('llm_output_tokens', 'asr_timeout_seconds', 'asr_response_format', 'mode'):
+        widget = window.fields[name]
+        before = window.collect()[name]
+        widget.setFocus()
+        event = QWheelEvent(QPointF(4, 4), QPointF(4, 4), QPoint(), QPoint(0, -120),
+                            Qt.MouseButton.NoButton, Qt.KeyboardModifier.NoModifier,
+                            Qt.ScrollPhase.NoScrollPhase, False)
+        QApplication.sendEvent(widget, event)
+        assert window.collect()[name] == before
+    window.fields['llm_output_tokens'].setValue(1024)
+    window.reset_note_budget()
+    assert window.collect()['llm_output_tokens'] == 65536
+    window.close()

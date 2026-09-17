@@ -12,6 +12,7 @@ from . import task_events as events
 from .artifacts import (
     atomic_write_json,
     atomic_write_text,
+    cached_file_sha256,
     file_sha256,
     migrate_auxiliary,
 )
@@ -105,7 +106,7 @@ def main(argv=None):
         media = args.media.expanduser().resolve(strict=True)
         output = (args.output_dir or media.parent / "转录结果").expanduser().resolve()
         check_directory(output, "转录保存位置", writable=True, create=True)
-        identity = file_sha256(media)
+        identity = cached_file_sha256(media)
         stem = f"{media.stem}_{identity[:12]}"
         metadata_path = migrate_auxiliary(output / (stem + ".json"))
         task = dict(course_id="local", course_title="本地音视频", sub_id=identity[:12], sub_title=media.stem)

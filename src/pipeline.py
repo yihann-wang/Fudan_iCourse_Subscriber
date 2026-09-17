@@ -976,7 +976,7 @@ def _transcribe_stage(in_q, out_q, transcriber_factory, counters):
                                   backend=result.backend, model=result.model, revision=result.model_revision)
                 task["transcript"] = ""  # downstream reads committed text; no large queue payload
                 _prog_final(f"tr:{task['sub_id']}", f"tr done {_task_tag(task)} · {len(result.text)} 字")
-                _stage_event(task, "tr", "done")
+                _stage_event(task, "tr", "done", " ".join(result.warnings))
                 if out_q is not None:
                     out_q.put(task)
             except Exception as exc:

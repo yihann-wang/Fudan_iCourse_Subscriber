@@ -7,6 +7,8 @@ import tempfile
 from functools import lru_cache
 from pathlib import Path
 
+from platformdirs import user_cache_path
+
 
 def atomic_write_text(path, text: str, *, private: bool = False):
     path = Path(path)
@@ -71,17 +73,43 @@ def file_sha256(path):
 
 
 @lru_cache(maxsize=512)
-def _cached_hash(path, signature):
-    return file_sha256(path)
+def _cached_hash(path, signature, cache_root, verify=False):
+    # Tiny text files are cheap to verify; persist hashes only for large media.
+    record = None
+    if signature[2] >= 8 * 1024 * 1024:
+        record = Path(cache_root) / (hashlib.sha256(path.encode()).hexdigest() + ".json")
+        try:
+            saved = json.loads(record.read_text())
+            digest = saved.get("sha256", "")
+            if (not verify and saved.get("signature") == list(signature) and isinstance(digest, str)
+                    and len(digest) == 64 and all(c in "0123456789abcdef" for c in digest)):
+                return digest
+        except (OSError, ValueError, AttributeError, TypeError):
+            pass
+    digest = file_sha256(path)
+    if file_signature(path) != signature:
+        raise RuntimeError("文件在校验期间发生变化，请等文件保存完成后再重试。")
+    if record is not None:
+        try:
+            atomic_write_json(record, dict(signature=signature, sha256=digest), private=True)
+        except OSError:
+            pass  # A cache failure must not invalidate a successfully checked file.
+    return digest
+
+
+def file_signature(path):
+    stat = Path(path).stat()
+    return (stat.st_dev, stat.st_ino, stat.st_size, stat.st_mtime_ns, stat.st_ctime_ns)
 
 
 def cached_file_sha256(path):
     path = Path(path).resolve()
-    stat = path.stat()
-    return _cached_hash(str(path), (stat.st_ino, stat.st_size, stat.st_mtime_ns, stat.st_ctime_ns))
+    root = os.environ.get("ICOURSE_HASH_CACHE_DIR") or str(
+        user_cache_path("Fudan iCourse Subscriber", appauthor=False) / "file-hashes")
+    return _cached_hash(str(path), file_signature(path), root, os.environ.get("ICOURSE_VERIFY_FILES") == "1")
 
 
 def local_media_id(path):
     # Content identity survives renames and moves; never infer an online ID
     # from a non-unique lecture title. Prefix distinguishes it from server IDs.
-    return "local-" + file_sha256(path)[:24]
+    return "local-" + cached_file_sha256(path)[:24]

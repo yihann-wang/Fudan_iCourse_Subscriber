@@ -147,7 +147,7 @@ class Summarizer:
         if not response.choices:
             raise EmptySummaryResponseError("模型没有返回结果（空响应）。")
         if response.choices[0].finish_reason == "length":
-            raise TruncatedSummaryError("笔记输出达到上限，未保存为完成结果。请提高输出上限后重试。")
+            raise TruncatedSummaryError(self._truncation_message())
         if response.choices[0].finish_reason != "stop":
             raise RuntimeError(f"模型未正常完成输出：{response.choices[0].finish_reason}")
         result = (getattr(response.choices[0].message, "content", None) or "").strip()
@@ -191,7 +191,7 @@ class Summarizer:
         if not choices:
             raise EmptySummaryResponseError("模型没有返回结果（空响应）。")
         if choices[0].get("finish_reason") == "length":
-            raise TruncatedSummaryError("摘要输出被截断，未保存为完成结果。")
+            raise TruncatedSummaryError(self._truncation_message())
         if choices[0].get("finish_reason") != "stop":
             raise RuntimeError(f"模型未正常完成输出：{choices[0].get('finish_reason')}")
         message = choices[0].get("message") or {}
@@ -245,7 +245,7 @@ class Summarizer:
         response.raise_for_status()
         data = response.json()
         if data.get("stop_reason") == "max_tokens":
-            raise TruncatedSummaryError("摘要输出被截断，未保存为完成结果。")
+            raise TruncatedSummaryError(self._truncation_message())
         if data.get("stop_reason") not in ("end_turn", "stop_sequence"):
             raise RuntimeError(f"模型未正常完成输出：{data.get('stop_reason')}")
         parts = data.get("content") or []
@@ -285,6 +285,10 @@ class Summarizer:
             if needle in msg:
                 return True
         return False
+
+    def _truncation_message(self):
+        return (f"笔记输出达到上限（本次 {self.max_output_tokens} tokens），未保存为完成结果。"
+                "请在设置中恢复笔记推荐参数或提高输出上限后重试。")
 
     # Bound transient retries; output recovery keeps the full transcript.
     _RETRY_WAITS = (5, 15)
@@ -335,6 +339,10 @@ class Summarizer:
         """Send the full transcript once; cache success until the file is committed."""
         if not content.strip():
             raise ValueError("整课转录为空，无法生成笔记。")
+        if len(content) >= 8000 and self.max_output_tokens < 4096:
+            raise ValueError(
+                f"当前笔记输出上限仅 {self.max_output_tokens} tokens，无法容纳长课笔记；"
+                f"建议恢复为 {DEFAULT_OUTPUT_TOKENS}。本次未调用笔记 API。")
         path = Path(checkpoint_path) if checkpoint_path else None
         identity = self._checkpoint_identity(title, content)
 
@@ -370,7 +378,7 @@ class Summarizer:
                 or saved.get("schema") != 3 or saved.get("identity") != identity or saved.get("result") is not None):
             archive_copy(path, path.parent / "history")
         save()  # Verify disk access before any paid request.
-        report(f"正在生成整篇笔记 · 完整原文 {len(content)} 字符")
+        report(f"正在生成整篇笔记 · 完整原文 {len(content)} 字符 · 输出上限 {self.max_output_tokens} tokens")
         text, model = self._generate_summary(title, content)
         result = SummaryResult(text, model)
         save(result)

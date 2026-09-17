@@ -70,6 +70,7 @@ zsh "安装 Mac.command"
 | App 启动与运行日志 | `~/Library/Logs/Fudan iCourse Subscriber/application.log` |
 | uv 管理的 Python | 通常为 `~/.local/share/uv/python/` |
 | 转录块缓存 | `~/Library/Application Support/Fudan iCourse Subscriber/asr-cache/` |
+| 大文件校验缓存 | `~/Library/Caches/Fudan iCourse Subscriber/file-hashes/` |
 
 `~` 代表自己的用户文件夹。以上隐藏路径可通过 Finder 的 **Go to Folder…** 打开。
 

@@ -3,21 +3,27 @@
 import hashlib
 import json
 import os
-import wave
-from array import array
 import tempfile
 import time
+import wave
+from array import array
 from pathlib import Path
 
-from . import task_events as events
-from filelock import FileLock, Timeout as LockTimeout
+from filelock import FileLock
+from filelock import Timeout as LockTimeout
 from platformdirs import user_data_path
 
-from .artifacts import atomic_write_json, atomic_write_text, cached_file_sha256, file_sha256, internal_path
+from . import task_events as events
+from .artifacts import (
+    atomic_write_json,
+    atomic_write_text,
+    cached_file_sha256,
+    file_sha256,
+    internal_path,
+)
 from .asr import ASRSettings, Segment, TranscriptionResult
 from .asr.client import CloudWorker
 from .asr.cloud import parse_response
-from .media import IncompleteAudioError as IncompleteAudioError
 from .media import (
     CancelledError,
     NoAudioStreamError,
@@ -27,6 +33,7 @@ from .media import (
     run_media,
     windows_subprocess_kwargs,
 )
+from .media import IncompleteAudioError as IncompleteAudioError
 
 
 def _bar(pct: float, width: int = 18) -> str:
@@ -175,6 +182,9 @@ class Transcriber:
 
     def _chunks(self, audio, cache, report):
         texts, segments, languages = [], [], []
+        empty_ranges = []
+        empty_checkpoints = []
+        recognized = False
         all_timed = True
         # MP3 at 64 kbps, with headroom for ID3 and encoding padding.
         seconds = min(self.settings.chunk_seconds, (self.settings.max_upload_mb * 1000000 - 65536) // 8000)
@@ -225,23 +235,34 @@ class Transcriber:
                             payload = self._worker.request(upload, duration=duration, cancel=self.cancel,
                                 progress=lambda e: report(start/rate, audio.duration, e.get("message", "等待语音服务")))
                             payload = parse_response(payload, duration)
-                            if not payload["text"]:
-                                raise RuntimeError("语音服务返回空文本；未将本块标为完成，请检查录音或模型。")
                         finally:
                             upload.unlink(missing_ok=True)
                     raw = json.dumps(payload, sort_keys=True, ensure_ascii=False).encode()
                     atomic_write_json(checkpoint, dict(result=payload, sha256=hashlib.sha256(raw).hexdigest()), private=True)
                 if payload["text"]:
+                    recognized = True
                     texts.append(payload["text"])
                     all_timed = all_timed and bool(payload["segments"])
                     segments.extend(Segment(s["start"] + start/rate, s["end"] + start/rate, s["text"])
                                     for s in payload["segments"])
+                else:
+                    empty_checkpoints.append(checkpoint)
+                    interval = f"{_srt_timestamp(start/rate)}–{_srt_timestamp(end/rate)}"
+                    empty_ranges.append(interval)
+                    texts.append(f"[转录提示：{interval} 未识别到文字；请对照该时段录像，不据此推测内容。]")
+                    report(start/rate, audio.duration, f"音频块 {index} 未识别到文字，已标记时间段并继续")
                 if payload["language"]:
                     languages.append(payload["language"])
                 start = end
                 report(end/rate, audio.duration, f"云端转录 · 音频块 {index} 已完成")
         # A partially timed transcript must not masquerade as complete subtitles.
-        return "\n".join(texts).strip(), tuple(segments) if all_timed else (), next(iter(languages), self.settings.language)
+        if not recognized:
+            # A wholly unrecognized recording is a failure, not a permanent
+            # cached success. Allow a later service recovery to try it again.
+            for checkpoint in empty_checkpoints:
+                checkpoint.unlink(missing_ok=True)
+        return ("\n".join(texts).strip() if recognized else "", tuple(segments) if all_timed else (),
+                next(iter(languages), self.settings.language), empty_ranges)
 
     def _transcribe(self, input_only_cmd, timeout=7200, prog_key=None,
                     title="", tag="", source_duration=None, identity=None):
@@ -275,12 +296,14 @@ class Transcriber:
                 except LockTimeout:
                     continue
             try:
-                text, segments, language = self._chunks(audio, cache, report)
+                text, segments, language, empty_ranges = self._chunks(audio, cache, report)
             finally:
                 lock.release()
         if not text:
             raise RuntimeError("未识别到语音，请检查录音；不会输出已完成的空转录。")
         warnings = []
+        if empty_ranges:
+            warnings.append(f"有 {len(empty_ranges)} 段音频未识别到文字，时间段已在转录原文中标注。")
         if not audio.source_duration:
             warnings.append("源时长未知，无法核对完整性。")
         if not segments:
