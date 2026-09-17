@@ -15,6 +15,19 @@ from . import config
 from .webvpn import WebVPNSession, get_vpn_url
 
 
+class ReplayNotAvailableError(RuntimeError):
+    """The school has scheduled a replay but has not opened it yet."""
+
+
+def _check_replay_response(data, sub_id):
+    if data.get("code") == 0:
+        return
+    message = str(data.get("msg") or "")
+    if "视频未到开放时间" in message:
+        raise ReplayNotAvailableError("回放未到开放时间，开放后再试")
+    raise RuntimeError(f"API error for sub-info {sub_id}: {message}")
+
+
 class ICourseClient:
     """Client for the iCourse API, operating through WebVPN."""
 
@@ -211,10 +224,7 @@ class ICourseClient:
         resp.raise_for_status()
         data = resp.json()
 
-        if data.get("code") != 0:
-            raise RuntimeError(
-                f"API error for sub {sub_id}: {data.get('msg')}"
-            )
+        _check_replay_response(data, sub_id)
 
         return data.get("data", {})
 
@@ -235,10 +245,7 @@ class ICourseClient:
         resp.raise_for_status()
         data = resp.json()
 
-        if data.get("code") != 0:
-            raise RuntimeError(
-                f"API error for sub-info {sub_id}: {data.get('msg')}"
-            )
+        _check_replay_response(data, sub_id)
 
         return data.get("data", {})
 

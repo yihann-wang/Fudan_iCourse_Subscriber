@@ -207,7 +207,7 @@ class Transcriber:
                     except (ValueError, KeyError, TypeError, RuntimeError):
                         pass
                 report(start/rate, audio.duration, f"云端转录 · 音频块 {index} · " +
-                       ("复用已完成结果" if payload is not None else "正在准备上传"))
+                       ("复用已完成结果" if payload is not None else "正在准备上传"), chunk=index)
                 if payload is None:
                     wav.setpos(start)
                     pcm = wav.readframes(end-start)
@@ -230,10 +230,10 @@ class Transcriber:
                             raise RuntimeError("上传音频准备失败。")
                         if upload.stat().st_size > self.settings.max_upload_mb * 1000000:
                             raise RuntimeError("音频块超出上传限制，请减小音频块时长。")
-                        report(start/rate, audio.duration, f"云端转录 · 音频块 {index} · 等待语音服务返回")
+                        report(start/rate, audio.duration, f"云端转录 · 音频块 {index} · 等待语音服务返回", chunk=index)
                         try:
                             payload = self._worker.request(upload, duration=duration, cancel=self.cancel,
-                                progress=lambda e: report(start/rate, audio.duration, e.get("message", "等待语音服务")))
+                                progress=lambda e: report(start/rate, audio.duration, e.get("message", "等待语音服务"), chunk=index, notice=True))
                             payload = parse_response(payload, duration)
                         finally:
                             upload.unlink(missing_ok=True)
@@ -250,11 +250,11 @@ class Transcriber:
                     interval = f"{_srt_timestamp(start/rate)}–{_srt_timestamp(end/rate)}"
                     empty_ranges.append(interval)
                     texts.append(f"[转录提示：{interval} 未识别到文字；请对照该时段录像，不据此推测内容。]")
-                    report(start/rate, audio.duration, f"音频块 {index} 未识别到文字，已标记时间段并继续")
+                    report(start/rate, audio.duration, f"音频块 {index} 未识别到文字，已标记时间段并继续", chunk=index, notice=True)
                 if payload["language"]:
                     languages.append(payload["language"])
                 start = end
-                report(end/rate, audio.duration, f"云端转录 · 音频块 {index} 已完成")
+                report(end/rate, audio.duration, f"云端转录 · 音频块 {index} 已完成", chunk=index)
         # A partially timed transcript must not masquerade as complete subtitles.
         if not recognized:
             # A wholly unrecognized recording is a failure, not a permanent
@@ -274,16 +274,17 @@ class Transcriber:
         head = f"tr {title} {tag}".rstrip()
         started = time.monotonic()
 
-        def report(completed, total, message):
+        def report(completed, total, message, *, chunk=None, notice=False):
             events.progress(message, phase="transcribing", unit="seconds", completed=completed,
-                            total=total, backend="cloud", model=self.settings.model)
+                            total=total, backend="cloud", model=self.settings.model, chunk=chunk, notice=notice)
             _prog(prog_key, f"{head} · {message} · {completed/total*100:.1f}%")
 
         with tempfile.TemporaryDirectory(prefix="icourse-audio-", dir=os.environ.get("ICOURSE_RUN_TEMP")) as tmp:
             events.progress("正在提取音频", phase="decoding")
             _prog(prog_key, f"{head} · 正在提取音频，转录由云端完成")
             audio = decode(input_only_cmd, Path(tmp) / "audio.wav", timeout=timeout,
-                           cancel=self.cancel, source_duration=source_duration)
+                           cancel=self.cancel, source_duration=source_duration,
+                           progress=lambda message: events.progress(message, phase="audio_channels"))
             identity = identity or file_sha256(audio.path)
             cache = self.cache_dir / identity / self.settings.fingerprint
             cache.mkdir(parents=True, exist_ok=True, mode=0o700)
@@ -301,7 +302,7 @@ class Transcriber:
                 lock.release()
         if not text:
             raise RuntimeError("未识别到语音，请检查录音；不会输出已完成的空转录。")
-        warnings = []
+        warnings = list(audio.warnings)
         if empty_ranges:
             warnings.append(f"有 {len(empty_ranges)} 段音频未识别到文字，时间段已在转录原文中标注。")
         if not audio.source_duration:

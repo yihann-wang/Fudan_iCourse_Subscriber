@@ -27,6 +27,12 @@ def set_secrets(values):
     _secrets = tuple(sorted({str(v) for v in values if v and len(str(v)) >= 4}, key=len, reverse=True))
 
 
+def environment_secrets(env):
+    # TOKEN is a credential suffix; TOKENS / TOKEN_LIMIT are ordinary budgets.
+    pattern = r"(?:^|_)(?:PASSWORD|PASSWD|API_?KEY|UISPSW|TOKEN|SECRET|COOKIE|AUTHORIZATION)(?:_\d+)?$"
+    return [value for name, value in env.items() if re.search(pattern, name.upper())]
+
+
 def redact(text, *, export=False):
     text = str(text)
     for value in _secrets:
@@ -59,7 +65,7 @@ def begin_run(run_id=None, **data):
             return
         _run_id, _seq, _started, _stream = run_id, 0, time.monotonic(), sys.stdout
         _context.set({})
-        set_secrets(v for k, v in os.environ.items() if any(s in k.upper() for s in ("PASSWORD", "API_KEY", "UISPSW", "TOKEN")))
+        set_secrets(environment_secrets(os.environ))
         emit("run_started", **data)
 
 

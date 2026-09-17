@@ -895,6 +895,8 @@ def _stage_failed(in_q, counters, task, stage, exc):
 
 
 def _download_stage(in_q, out_q, client, sleep_sec, counters):
+    from src.icourse import ICourseClient, ReplayNotAvailableError
+
     while True:
         task = in_q.get()
         try:
@@ -916,11 +918,12 @@ def _download_stage(in_q, out_q, client, sleep_sec, counters):
                             prog_key=f"dl:{task['sub_id']}", title=_task_title(task),
                         )
                         break
+                    except ReplayNotAvailableError:
+                        raise
                     except Exception:
                         if attempt == 2:
                             raise
                         if not client.check_alive():
-                            from src.icourse import ICourseClient
                             from src.webvpn import WebVPNSession
                             client = ICourseClient(_login_with_retry(WebVPNSession, max_attempts=2))
                         events.progress("下载失败，等待重试", phase="retry", attempt=attempt + 1,
@@ -937,6 +940,10 @@ def _download_stage(in_q, out_q, client, sleep_sec, counters):
                 _stage_event(task, "dl", "done")
                 if out_q is not None:
                     out_q.put(task)
+            except ReplayNotAvailableError as exc:
+                mark_stage(in_q, "pending", str(exc))
+                counters.inc("pending")
+                _stage_event(task, "dl", "pending", str(exc))
             except Exception as exc:
                 _stage_failed(in_q, counters, task, "dl", exc)
             if sleep_sec > 0:

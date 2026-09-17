@@ -165,7 +165,10 @@ class TaskViewModel:
                     return False
                 old_phase = stage.metrics.get("phase")
                 phase = metrics.get("phase", old_phase)
-                if phase != old_phase or metrics.get("attempt", stage.metrics.get("attempt")) != stage.metrics.get("attempt") or metrics.get("model", stage.metrics.get("model")) != stage.metrics.get("model"):
+                if (phase != old_phase or metrics.get("attempt", stage.metrics.get("attempt")) != stage.metrics.get("attempt")
+                        or metrics.get("model", stage.metrics.get("model")) != stage.metrics.get("model")
+                        or metrics.get("chunk", stage.metrics.get("chunk")) != stage.metrics.get("chunk")
+                        or (metrics.get("notice") and message != stage.message)):
                     stage.metrics = {}
                     stage.changed = now
                     if message:

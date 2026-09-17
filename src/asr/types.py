@@ -79,7 +79,7 @@ class ASRSettings:
         # Changing a key or a transport retry budget must not re-bill completed audio.
         for key in ("timeout_seconds", "retries"):
             value.pop(key)
-        value["protocol_version"] = 1
+        value["protocol_version"] = 2  # Phase-safe audio must not reuse old downmix results.
         return hashlib.sha256(json.dumps(value, sort_keys=True).encode()).hexdigest()
 
 

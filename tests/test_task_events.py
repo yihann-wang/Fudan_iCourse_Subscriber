@@ -109,3 +109,31 @@ def test_engine_stdout_is_only_protocol_and_stderr_contains_diagnostics(tmp_path
     assert records and all(e["run_id"] == env["ICOURSE_RUN_ID"] for e in records)
     assert records[0]["kind"] == "run_started" and records[-1]["kind"] == "run_finished"
     assert '"system"' in result.stderr
+
+
+def test_token_budgets_are_visible_but_actual_tokens_stay_secret(monkeypatch):
+    secret = uuid4().hex
+    numeric_password = '88776655'
+    env = dict(LLM_MAX_OUTPUT_TOKENS='65536', TOKEN_LIMIT='8192',
+               ANTHROPIC_AUTH_TOKEN=secret, LLM_API_KEY_1=uuid4().hex, UISPsw=numeric_password)
+    monkeypatch.setattr(events, '_secrets', ())
+    events.set_secrets(events.environment_secrets(env))
+    text = events.redact(f'输出上限 65536 tokens / 8192; {secret}; {numeric_password}')
+    assert '65536' in text and '8192' in text
+    assert secret not in text and numeric_password not in text
+
+
+def test_new_audio_chunks_and_empty_results_are_logged_without_tick_spam():
+    model = TaskViewModel('chunks')
+    task(model, dl='cached', tr='queued', sm='waiting')
+    feed(model, 'stage', course_id='101', sub_id='123456', stage='tr', status='running')
+    before = len(model.records)
+    for chunk in (1, 2):
+        for _ in range(10):
+            feed(model, 'progress', course_id='101', sub_id='123456', stage='tr',
+                 message=f'音频块 {chunk}', metrics=dict(phase='transcribing', chunk=chunk))
+    assert len(model.records) == before + 2
+    for _ in range(2):
+        feed(model, 'progress', course_id='101', sub_id='123456', stage='tr',
+             message='本块为空', metrics=dict(phase='transcribing', chunk=2, notice=True))
+    assert len(model.records) == before + 3

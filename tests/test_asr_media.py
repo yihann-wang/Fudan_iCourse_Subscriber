@@ -58,6 +58,35 @@ def test_media_cancel_terminates_child():
         run_media([sys.executable, "-c", "import time; time.sleep(60)"], timeout=10, cancel=cancel)
 
 
+@pytest.mark.parametrize('mode', ['opposite', 'same', 'separate', 'right_only'])
+def test_stereo_decode_preserves_speech_when_channels_cancel(tmp_path, mode):
+    import math
+    from array import array
+    source, target = tmp_path / 'stereo.wav', tmp_path / 'mono.wav'
+    rate = 16000
+    left = [round(8000 * math.sin(2 * math.pi * 400 * i / rate)) for i in range(rate)]
+    right = {'opposite': [-x for x in left], 'same': left,
+             'separate': [round(8000 * math.sin(2 * math.pi * 800 * i / rate)) for i in range(rate)],
+             'right_only': left}[mode]
+    if mode == 'right_only':
+        left = [0] * rate
+    with wave.open(str(source), 'wb') as wav:
+        wav.setparams((2, 2, rate, 0, 'NONE', 'not compressed'))
+        wav.writeframes(array('h', (x for pair in zip(left, right) for x in pair)).tobytes())
+    result = decode([resolve_media_tool('ffmpeg'), '-i', str(source)], target)
+    with wave.open(str(target), 'rb') as wav:
+        samples = array('h', wav.readframes(wav.getnframes()))
+        assert wav.getnchannels() == 1 and wav.getnframes() == rate
+    def amplitude(frequency):
+        return abs(sum(x * math.sin(2 * math.pi * frequency * i / rate)
+                       for i, x in enumerate(samples))) * 2 / len(samples)
+    assert amplitude(400) > 3500
+    if mode == 'separate':
+        assert amplitude(800) > 3500  # Ordinary stereo must retain both speakers.
+    assert bool(result.warnings) == (mode == 'opposite')
+    assert not list(tmp_path.glob('*.channels.wav'))
+
+
 def test_failed_attempt_does_not_reuse_previous_segments(monkeypatch, wav, tmp_path):
     # Use non-silent audio so the service is consulted.
     with wave.open(str(wav), "wb") as audio:
