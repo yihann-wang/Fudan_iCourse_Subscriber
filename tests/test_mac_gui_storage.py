@@ -69,7 +69,8 @@ def test_scrolling_settings_does_not_change_budget_or_model(qt_app):
     from PySide6.QtCore import QPoint, QPointF, Qt
     from PySide6.QtGui import QWheelEvent
     window = mac_gui.MainWindow(initial_values=defaults())
-    for name in ('llm_output_tokens', 'asr_timeout_seconds', 'asr_response_format', 'mode'):
+    for name in ('llm_output_tokens', 'asr_timeout_seconds', 'asr_response_format', 'mode',
+                 'asr_provider', 'asr_dashscope_model'):
         widget = window.fields[name]
         before = window.collect()[name]
         widget.setFocus()
@@ -81,4 +82,25 @@ def test_scrolling_settings_does_not_change_budget_or_model(qt_app):
     window.fields['llm_output_tokens'].setValue(1024)
     window.reset_note_budget()
     assert window.collect()['llm_output_tokens'] == 65536
+    window.close()
+
+
+def test_provider_switch_preserves_both_configurations_and_keys(qt_app):
+    from src.preferences import runtime_environment
+    values = defaults()
+    values.update(asr_api_key=uuid4().hex, asr_dashscope_api_key=uuid4().hex)
+    window = mac_gui.MainWindow(initial_values=values)
+    window.fields['asr_provider'].setCurrentIndex(1)
+    window.fields['asr_dashscope_model'].setCurrentIndex(1)
+    assert window.fields['asr_model'].isHidden()
+    assert not window.fields['asr_dashscope_model'].isHidden()
+    selected = window.collect()
+    env = runtime_environment(selected, {})
+    assert env['ASR_MODEL'] == 'paraformer-v2'
+    assert env['ASR_API_KEY'] == values['asr_dashscope_api_key']
+    window.fields['asr_provider'].setCurrentIndex(0)
+    selected = window.collect()
+    assert selected['asr_dashscope_model'] == 'paraformer-v2'
+    assert selected['asr_model'] == values['asr_model']
+    assert runtime_environment(selected, {})['ASR_API_KEY'] == values['asr_api_key']
     window.close()

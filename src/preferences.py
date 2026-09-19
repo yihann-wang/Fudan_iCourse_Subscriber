@@ -9,11 +9,11 @@ from pathlib import Path
 from platformdirs import user_config_path
 
 from .artifacts import atomic_write_json
-from .asr.types import DEFAULT_BASE_URL, DEFAULT_MODEL
+from .asr.types import DASHSCOPE_BASE_URL, DEFAULT_BASE_URL, DEFAULT_MODEL
 from .summary_settings import DEFAULT_OUTPUT_TOKENS, DEFAULT_TIMEOUT_MINUTES
 
 SERVICE = "Fudan iCourse Subscriber"
-SECRET_FIELDS = ("uis_psw", "llm_api_key_1", "asr_api_key")
+SECRET_FIELDS = ("uis_psw", "llm_api_key_1", "asr_api_key", "asr_dashscope_api_key")
 
 
 def defaults():
@@ -22,6 +22,8 @@ def defaults():
                 sub_ids="", skip_time_periods="", out_dir=str(home / "课程"),
                 summary_dir=str(home / "笔记"), local_media="", asr_base_url=DEFAULT_BASE_URL, asr_model=DEFAULT_MODEL,
                 asr_api_key="", asr_language="", asr_prompt="", asr_response_format="",
+                asr_provider="openai", asr_dashscope_base_url=DASHSCOPE_BASE_URL,
+                asr_dashscope_model="fun-asr", asr_dashscope_api_key="",
                 chunk_seconds=300, asr_max_upload_mb=20, asr_timeout_seconds=300, asr_retries=2,
                 llm_name_1="LLM", llm_api_key_1="", llm_base_url_1="", llm_models_1="",
                 llm_output_tokens=DEFAULT_OUTPUT_TOKENS,
@@ -83,7 +85,7 @@ def runtime_environment(values, base=None):
         if key.startswith(("LLM_", "WHISPER_", "ASR_", "GEMINI_", "DASHSCOPE_", "ANTHROPIC_")):
             env.pop(key)
     mapping = dict(stu_id="StuId", uis_psw="UISPsw", course_ids="COURSE_IDS",
-                   asr_base_url="ASR_BASE_URL", asr_model="ASR_MODEL", asr_api_key="ASR_API_KEY",
+                   asr_provider="ASR_PROVIDER", asr_base_url="ASR_BASE_URL", asr_model="ASR_MODEL", asr_api_key="ASR_API_KEY",
                    asr_language="ASR_LANGUAGE", asr_prompt="ASR_INITIAL_PROMPT",
                    asr_response_format="ASR_RESPONSE_FORMAT", asr_max_upload_mb="ASR_MAX_UPLOAD_MB",
                    asr_timeout_seconds="ASR_TIMEOUT_SECONDS", asr_retries="ASR_RETRIES",
@@ -91,6 +93,12 @@ def runtime_environment(values, base=None):
                    llm_api_key_1="LLM_API_KEY_1", llm_base_url_1="LLM_BASE_URL_1", llm_models_1="LLM_MODELS_1")
     for field, key in mapping.items():
         env[key] = str(values.get(field, defaults().get(field, "")))
+    if env["ASR_PROVIDER"] == "dashscope":
+        for field, key in (("asr_dashscope_base_url", "ASR_BASE_URL"),
+                           ("asr_dashscope_model", "ASR_MODEL"), ("asr_dashscope_api_key", "ASR_API_KEY")):
+            env[key] = str(values.get(field, defaults()[field]))
+        env["ASR_INITIAL_PROMPT"] = ""
+        env["ASR_RESPONSE_FORMAT"] = ""  # File ASR always requests its native timed JSON.
     for field, key, scale in (("llm_output_tokens", "LLM_MAX_OUTPUT_TOKENS", 1),
                               ("llm_timeout_minutes", "API_TIMEOUT_MS", 60000)):
         value = int(values.get(field, defaults()[field]))

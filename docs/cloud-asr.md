@@ -2,7 +2,54 @@
 
 0.5.0 起不再提供本地语音识别。Mac 使用 ffmpeg 提取、压缩音频，发送到你配置的语音服务。取得各块文字后，合并整节课原文，再交给笔记模型一次总结。语音分块不会引入提纲、分章写作或额外笔记核对调用。
 
-## App 配置
+## 阿里云百炼（Fun-ASR / Paraformer）
+
+0.6.0 新增百炼录音文件识别，两种模型都根据官方返回的句子/词起止时间生成字幕。它们共用一个百炼 API Key，可在界面切换。
+
+1. 在 App 的“设置 → 语音服务”选择“阿里云百炼（Fun-ASR / Paraformer，带字幕）”。
+2. 北京地域地址保留 `https://dashscope.aliyuncs.com/api/v1`，也可填写业务空间的 `https://<WorkspaceId>.cn-beijing.maas.aliyuncs.com/api/v1`。
+3. “百炼语音模型”选择 **Fun-ASR（fun-asr）** 或 **Paraformer（paraformer-v2）**。
+4. “百炼 API Key”填写北京地域的百炼密钥。密钥与兼容服务分开保存在系统钥匙串，切换服务不会互相覆盖或转发。
+5. 语言留空自动识别，或填 `zh,en`。此模式自动获取带时间戳的结果，不需要填写返回格式或兼容接口的 prompt。
+6. 保存设置，点击“检查语音连接”。检查只获取模型上传凭证，不上传音频、不提交付费识别；实际识别权限和效果仍需短录音确认。
+
+旧课补字幕：选择“为本地课程生成笔记”，指定课程 ID 和一个课次，勾选“重新生成已有转录和笔记”。已有 MP4 会复用，新转录完成后在录像旁保存同名 SRT。“只重新生成笔记”不会重新转录或补字幕。重新打开视频或重新载入字幕后可在 IINA 查看。
+
+默认每五分钟上传一块，合并时间轴时加回该块在整课的位置。Paraformer 开启时间戳校准；长句只有在词时间戳有效且文字匹配时才拆成短字幕，不按字数均分出假时间戳。完整文字合并后仍只发一次正常笔记请求。
+
+### 上传与恢复
+
+桌面版使用百炼官方私有临时存储，不需要额外填写 OSS AccessKey。音频对象使用随机文件名，临时地址有效 48 小时。厂商将此上传方式定位为开发测试使用，不适用于生产服务或大规模并发部署；此类部署需另接自有 OSS。[官方临时文件说明](https://help.aliyun.com/zh/model-studio/get-temporary-file-url/)
+
+上传凭证、签名 URL 和 API Key 不写进任务缓存或日志。API Key 仅发送到百炼 API；文件存储使用临时上传凭证，下载结果不携带 API Key。
+
+每块提交成功后立即保存任务编号。停止客户端不会撤销云端任务；再次运行优先查询原任务。查询暂时失败会有限重试；等待超时保留编号，下次继续查询。获取结果后先缓存结果，再由主进程保存完成块，避免两者之间中断后重复识别。
+
+提交请求发出但没有收到编号时，无法确定是否计费，因此不自动重复提交。请先在百炼核对，再清理对应缓存后重新运行；重新提交可能再次计费。云端结果下载地址仅有效 24 小时，过期且本机尚未保存结果的任务可能需要重新识别。
+
+恢复信息与块缓存在 `~/Library/Application Support/Fudan iCourse Subscriber/asr-cache/`。更换模型会使用独立缓存，不把 Fun-ASR 的文字当作 Paraformer 的结果复用。
+
+### CLI 配置
+
+在自己的 `.env` 中设置以下选项，并填写 `ASR_API_KEY`（不要在命令历史中输入密钥）：
+
+```dotenv
+ASR_PROVIDER=dashscope
+ASR_BASE_URL=https://dashscope.aliyuncs.com/api/v1
+ASR_MODEL=fun-asr
+ASR_API_KEY=
+ASR_LANGUAGE=zh,en
+ASR_INITIAL_PROMPT=
+ASR_RESPONSE_FORMAT=
+```
+
+换模型时，将 `ASR_MODEL` 改成 `paraformer-v2`。使用 `icourse check-asr --env-file .env` 检查连接，或 `icourse transcribe --env-file .env /path/to/audio.mp3` 转录本地文件。
+
+验证范围：离线 HTTP 模拟覆盖两种模型的上传、提交、查询、时间戳解析、跨块偏移、恢复与密钥隔离；尚未用真实百炼账户完成端到端识别验收。先用一小段录音确认账户、地域、识别文字和字幕同步，再批量处理。
+
+接口依据：[Fun-ASR 录音识别](https://help.aliyun.com/zh/model-studio/fun-asr-recorded-speech-recognition-http-api)、[Paraformer 录音识别](https://help.aliyun.com/zh/model-studio/paraformer-recorded-speech-recognition-restful-api)。
+
+## 兼容语音服务配置
 
 在“设置”填写以下字段，点击“保存设置”：
 
@@ -30,7 +77,7 @@
 
 语言、术语、返回格式仅在非空时发送。不同模型支持的参数不同；不要向不支持的接口强行要求 `verbose_json`。支持标准时间戳响应的服务可以选择它生成字幕。例如 Groq 的兼容基础地址为 `https://api.groq.com/openai/v1`，模型和限制以其文档为准；本版没有对该服务做真实音频验收。
 
-阿里云 DashScope 的异步任务、WebSocket 实时识别等协议不能仅改地址接入，需要单独适配器。兼容音频上传协议与“任意语音 API”不同。
+Fun-ASR / Paraformer 的异步录音识别使用上面的百炼模式，不能仅在兼容模式中改地址。WebSocket 实时识别等其他协议仍需另行适配。兼容音频上传协议与“任意语音 API”不同。
 
 参考：[硅基流动音频接口](https://docs.siliconflow.cn/docs/api/audio-transcriptions-post)、[Groq 语音接口](https://console.groq.com/docs/speech-to-text)。新模型限制可能不同于通用文档，以上默认值是客户端选择，不代表厂商保证的最大限额。价格、额度与限流以服务账户为准。
 

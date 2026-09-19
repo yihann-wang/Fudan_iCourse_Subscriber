@@ -160,6 +160,12 @@ class MainWindow(QMainWindow):
         reset_budget = QPushButton("恢复笔记推荐参数（65536 tokens / 20 分钟）")
         reset_budget.clicked.connect(self.reset_note_budget)
         config.addRow("", reset_budget)
+        provider = ScrollSafeComboBox()
+        provider.addItem("兼容语音服务（硅基流动 / Groq 等）", "openai")
+        provider.addItem("阿里云百炼（Fun-ASR / Paraformer，带字幕）", "dashscope")
+        provider.setCurrentIndex(max(0, provider.findData(self.values.get("asr_provider", "openai"))))
+        self.fields["asr_provider"] = provider
+        config.addRow("语音服务", provider)
         self.add_text(config, "asr_base_url", "语音服务地址", "OpenAI 兼容的音频上传接口，例如 https://api.siliconflow.cn/v1")
         self.add_text(config, "asr_model", "语音模型", "填写服务商提供的完整模型名称，可随时更换")
         self.add_text(config, "asr_api_key", "语音服务 API Key", secret=True)
@@ -172,6 +178,30 @@ class MainWindow(QMainWindow):
         response_format.setCurrentIndex(max(0, response_format.findData(self.values.get("asr_response_format", ""))))
         self.fields["asr_response_format"] = response_format
         config.addRow("语音返回格式", response_format)
+        self.add_text(config, "asr_dashscope_base_url", "百炼服务地址", "北京：https://dashscope.aliyuncs.com/api/v1")
+        ali_model = ScrollSafeComboBox()
+        ali_model.addItem("Fun-ASR（fun-asr）", "fun-asr")
+        ali_model.addItem("Paraformer（paraformer-v2）", "paraformer-v2")
+        ali_model.setCurrentIndex(max(0, ali_model.findData(self.values.get("asr_dashscope_model", "fun-asr"))))
+        self.fields["asr_dashscope_model"] = ali_model
+        config.addRow("百炼语音模型", ali_model)
+        self.add_text(config, "asr_dashscope_api_key", "百炼 API Key", "填写所选地域的百炼密钥，与硅基流动密钥分开保存", secret=True)
+        ali_hint = QLabel("自动上传音频并生成原文和同步字幕。支持中断后继续查询。"
+                          "语言可留空，或填 zh,en；已有课程需勾选“重新生成已有转录和笔记”。")
+        ali_hint.setWordWrap(True)
+        config.addRow(ali_hint)
+
+        def show_asr_provider():
+            aliyun = provider.currentData() == "dashscope"
+            for name in ("asr_base_url", "asr_model", "asr_api_key", "asr_prompt", "asr_response_format"):
+                config.setRowVisible(self.fields[name], not aliyun)
+            for name in ("asr_dashscope_base_url", "asr_dashscope_model", "asr_dashscope_api_key"):
+                config.setRowVisible(self.fields[name], aliyun)
+            config.setRowVisible(ali_hint, aliyun)
+            self.fields["asr_language"].setPlaceholderText("留空自动识别；或填 zh,en" if aliyun else "默认留空；服务支持时可填 zh 或 en")
+
+        provider.currentIndexChanged.connect(show_asr_provider)
+        show_asr_provider()
         for name, label, default, low, high, suffix in (
             ("chunk_seconds", "音频块最长时长", 300, 30, 1800, " 秒"),
             ("asr_max_upload_mb", "单次上传大小上限", 20, 1, 100, " MB"),

@@ -5,6 +5,7 @@ import sys
 
 from .cloud import CloudAPI, SpeechAPIError
 from .types import ASRSettings
+from .dashscope import DashScopeAPI
 
 
 def emit(value):
@@ -18,9 +19,11 @@ def main():
             request = json.loads(line)
             if request.get("op") == "close":
                 return
-            api = CloudAPI(ASRSettings(**request["settings"]))
+            settings = ASRSettings(**request["settings"])
+            api = (DashScopeAPI if settings.provider == "dashscope" else CloudAPI)(settings)
+            options = {"task_path": request.get("task_path")} if settings.provider == "dashscope" else {}
             result = (api.check() if request["op"] == "check" else
-                      api.transcribe(request["path"], request["duration"], progress=emit))
+                      api.transcribe(request["path"], request["duration"], progress=emit, **options))
             emit(dict(event="result", **result))
         except (SpeechAPIError, ValueError) as exc:
             # SpeechAPIError and settings validation contain controlled messages only.

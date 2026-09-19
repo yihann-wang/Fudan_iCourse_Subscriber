@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "fudan-icourse-subscriber"
-version = "0.5.2"
+version = "0.6.0"
 description = "iCourse for macOS: cloud transcription and whole-lecture notes"
 readme = "README.md"
 requires-python = ">=3.11,<3.14"

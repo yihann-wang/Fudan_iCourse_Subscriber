@@ -17,6 +17,7 @@ from .artifacts import (
     migrate_auxiliary,
 )
 from .asr import ASRSettings
+from .asr.types import DASHSCOPE_BASE_URL, DEFAULT_BASE_URL, DEFAULT_MODEL
 from .storage_access import check_directory
 
 
@@ -49,8 +50,11 @@ def doctor():
 
 def _settings(args):
     settings = ASRSettings.from_env()
-    values = {field: getattr(args, field) for field in ("base_url", "model", "response_format")
+    values = {field: getattr(args, field) for field in ("provider", "base_url", "model", "response_format")
               if getattr(args, field) is not None}
+    if args.provider is not None and args.provider != settings.provider:
+        values.setdefault("base_url", DASHSCOPE_BASE_URL if args.provider == "dashscope" else DEFAULT_BASE_URL)
+        values.setdefault("model", "fun-asr" if args.provider == "dashscope" else DEFAULT_MODEL)
     return replace(settings, **values).resolved()
 
 
@@ -72,6 +76,7 @@ def main(argv=None):
     for name in ("check-asr", "transcribe"):
         command = commands.add_parser(name)
         command.add_argument("--base-url")
+        command.add_argument("--provider", choices=["openai", "dashscope"])
         command.add_argument("--model")
         command.add_argument("--env-file", type=Path, help="读取指定配置；默认只使用环境变量")
         command.add_argument("--response-format", choices=["json", "verbose_json", "text", "srt"])

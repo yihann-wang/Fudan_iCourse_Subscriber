@@ -149,12 +149,13 @@ chmod 600 .env
 | `LLM_API_STYLE_1` | 可选 `openai` 或 `anthropic`，通常自动识别 |
 | `LLM_MAX_OUTPUT_TOKENS` | 单次输出预算，默认 65536 |
 | `API_TIMEOUT_MS` | 单次请求等待上限，毫秒；默认 1200000 |
-| `ASR_BASE_URL`、`ASR_MODEL`、`ASR_API_KEY` | 语音服务基础地址、完整模型 ID、密钥 |
+| `ASR_PROVIDER` | `openai`（默认兼容接口）或 `dashscope`（百炼录音文件识别） |
+| `ASR_BASE_URL`、`ASR_MODEL`、`ASR_API_KEY` | 语音服务基础地址、完整模型 ID、所选服务的密钥；百炼选 `fun-asr` 或 `paraformer-v2` |
 | `ASR_LANGUAGE`、`ASR_INITIAL_PROMPT` | 可选语言和术语提示；不支持的服务请留空 |
 | `ASR_RESPONSE_FORMAT` | 默认留空；可选 json、verbose_json、text、srt，须服务支持 |
 | `ASR_CHUNK_SECONDS` | 上传音频块最长时长，默认 300 秒，范围 30–1800 |
 | `ASR_MAX_UPLOAD_MB` | 单块文件上限，默认 20 MB；程序会据此进一步缩短块 |
-| `ASR_TIMEOUT_SECONDS`、`ASR_RETRIES` | 单次读超时默认 300 秒，失败最多重试 2 次 |
+| `ASR_TIMEOUT_SECONDS`、`ASR_RETRIES` | 默认 300 秒、最多重试 2 次；百炼等待超时保留任务，下次继续查询，不自动重复提交 |
 | `FFMPEG_DIR` | 自定义 ffmpeg/ffprobe 的目录 |
 
 旧变量 `LLM_INPUT_CHAR_LIMIT` 已停用；笔记输入不再按字符切块。旧本地转录参数不再使用。

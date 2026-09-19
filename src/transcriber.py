@@ -232,13 +232,17 @@ class Transcriber:
                             raise RuntimeError("音频块超出上传限制，请减小音频块时长。")
                         report(start/rate, audio.duration, f"云端转录 · 音频块 {index} · 等待语音服务返回", chunk=index)
                         try:
+                            options = ({"task_path": checkpoint.with_suffix(".task.json")}
+                                       if self.settings.provider == "dashscope" else {})
                             payload = self._worker.request(upload, duration=duration, cancel=self.cancel,
-                                progress=lambda e: report(start/rate, audio.duration, e.get("message", "等待语音服务"), chunk=index, notice=True))
+                                progress=lambda e: report(start/rate, audio.duration, e.get("message", "等待语音服务"), chunk=index, notice=True), **options)
                             payload = parse_response(payload, duration)
                         finally:
                             upload.unlink(missing_ok=True)
                     raw = json.dumps(payload, sort_keys=True, ensure_ascii=False).encode()
                     atomic_write_json(checkpoint, dict(result=payload, sha256=hashlib.sha256(raw).hexdigest()), private=True)
+                    if self.settings.provider == "dashscope":
+                        checkpoint.with_suffix(".task.json").unlink(missing_ok=True)
                 if payload["text"]:
                     recognized = True
                     texts.append(payload["text"])

@@ -28,6 +28,7 @@ GitHub Actions 在 macOS 14、macOS 26 和 Linux 上检查锁定依赖、代码�
 | `src/pipeline.py`、`src/pipeline_state.py` | 下载 → 转录 → 笔记队列、SQLite 状态与锁 |
 | `src/icourse.py`、`src/webvpn.py` | 学校登录、课程目录与回放 |
 | `src/asr/`、`src/transcriber.py`、`src/media.py` | 兼容云端语音接口、可取消的网络进程、音频块缓存与可选字幕 |
+| `src/asr/dashscope.py` | Fun-ASR / Paraformer 私有上传、异步任务恢复、句子/词时间戳与字幕分组 |
 | `src/summarizer.py` | 整课单次请求、重试与完整响应验证 |
 | `src/artifacts.py`、`src/summary_storage.py` | 校验、隐藏状态、原子写入与历史 |
 | `scripts/install_mac_runtime.py`、`scripts/create_mac_app.py` | 独立运行环境与本机启动器 |

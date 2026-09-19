@@ -45,14 +45,15 @@ class CloudWorker:
 
         threading.Thread(target=read, daemon=True, name="asr-protocol").start()
 
-    def request(self, path=None, *, cancel=None, progress=None, duration=None, timeout=None):
+    def request(self, path=None, *, cancel=None, progress=None, duration=None, timeout=None, task_path=None):
         with self.lock:
             if cancel is not None and cancel.is_set():
                 raise CancelledError("转录已取消。")
             timeout = timeout or (self.settings.timeout_seconds + 15) * (self.settings.retries + 1) + 360
             self._start()
             self.process.stdin.write(json.dumps(dict(op="check" if path is None else "transcribe",
-                                                     settings=asdict(self.settings), path=str(path), duration=duration)) + "\n")
+                                                     settings=asdict(self.settings), path=str(path), duration=duration,
+                                                     task_path=str(task_path) if task_path else None)) + "\n")
             self.process.stdin.flush()
             started = time.monotonic()
             try:

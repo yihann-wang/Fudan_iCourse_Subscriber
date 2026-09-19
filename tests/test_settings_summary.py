@@ -27,7 +27,8 @@ def test_secrets_never_written_to_preferences(tmp_path):
     fake_password = uuid4().hex
     fake_api_key = uuid4().hex
     values = defaults()
-    values.update(uis_psw=fake_password, llm_api_key_1=fake_api_key, asr_api_key=uuid4().hex)
+    values.update(uis_psw=fake_password, llm_api_key_1=fake_api_key,
+                  asr_api_key=uuid4().hex, asr_dashscope_api_key=uuid4().hex)
     store.save(values)
     text = path.read_text()
     assert all(values[field] not in text for field in SECRET_FIELDS)
