@@ -71,7 +71,7 @@ def setup(server, tmp_path, model='fun-asr'):
     return media, tmp_path / 'chunk.task.json', settings
 
 
-@pytest.mark.parametrize('model', ['fun-asr', 'paraformer-v2'])
+@pytest.mark.parametrize('model', ['fun-asr', 'paraformer-v2', 'fun-asr-2025-11-07', 'Vendor/Custom-ASR-v7'])
 def test_both_models_upload_poll_and_write_timed_subtitles(ali_server, tmp_path, model):
     media, state, settings = setup(ali_server, tmp_path, model)
     ali_server['responses'] = [(200, policy(ali_server)), (200, {}),
@@ -98,7 +98,7 @@ def test_both_models_upload_poll_and_write_timed_subtitles(ali_server, tmp_path,
     assert calls[2][2]['X-DashScope-Async'] == 'enable'
     assert calls[2][2]['X-DashScope-OssResourceResolve'] == 'enable'
     assert request['parameters']['language_hints'] == ['zh', 'en']
-    assert ('timestamp_alignment_enabled' in request['parameters']) == (model == 'paraformer-v2')
+    assert 'timestamp_alignment_enabled' not in request['parameters']  # Service default for every model.
     assert 'response_format' not in request and 'prompt' not in request
     saved = state.read_text()
     assert settings.api_key not in saved and 'oss://' not in saved and 'Signature' not in saved
@@ -109,6 +109,50 @@ def test_both_models_upload_poll_and_write_timed_subtitles(ali_server, tmp_path,
     finally:
         api.close()
     assert len(ali_server['requests']) == 5  # Result survives a parent crash before checkpoint write.
+
+
+@pytest.mark.parametrize('alignment,expected', [('enabled', True), ('disabled', False)])
+def test_timestamp_alignment_is_explicit_and_independent_of_model(ali_server, tmp_path, alignment, expected):
+    media, state, settings = setup(ali_server, tmp_path, 'Custom-ASR')
+    settings = replace(settings, timestamp_alignment=alignment)
+    ali_server['responses'] = [(200, policy(ali_server)), (200, {}),
+        (200, {'output': {'task_id': 'custom-job'}}), (200, success(ali_server)), (200, transcript())]
+    api = DashScopeAPI(settings)
+    try:
+        assert api.transcribe(media, 3, task_path=state)['text']
+    finally:
+        api.close()
+    request = json.loads(ali_server['requests'][2][3])
+    assert request['parameters']['timestamp_alignment_enabled'] is expected
+    assert request['model'] == 'Custom-ASR'
+    assert settings.fingerprint != replace(settings, timestamp_alignment='default').fingerprint
+
+
+def test_custom_gateway_model_and_protocol_mismatch_errors():
+    settings = ASRSettings(provider='dashscope', base_url='https://speech.example.invalid/team/api/v1', model='Custom/v9').resolved()
+    assert settings.model == 'Custom/v9' and settings.base_url.endswith('/team/api/v1')
+    api = DashScopeAPI(settings)
+    try:
+        assert api._storage_url('https://speech.example.invalid/private/file')
+        with pytest.raises(SpeechAPIError):
+            api._storage_url('https://unrelated.example.invalid/private/file')
+    finally:
+        api.close()
+    with pytest.raises(ValueError, match='不能使用'):
+        replace(settings, base_url='https://dashscope.aliyuncs.com/compatible-mode/v1').resolved()
+    with pytest.raises(ValueError, match='切换'):
+        replace(settings, provider='openai', base_url=DASHSCOPE_BASE_URL).resolved()
+
+
+def test_cli_overrides_are_validated_after_protocol_selection(monkeypatch):
+    from src.cli import _settings
+    monkeypatch.setenv('ASR_PROVIDER', 'openai')
+    monkeypatch.setenv('ASR_BASE_URL', DASHSCOPE_BASE_URL)
+    monkeypatch.delenv('ASR_BACKEND', raising=False)
+    args = SimpleNamespace(provider='dashscope', model='Custom/v9', base_url=None,
+                           response_format=None, timestamp_alignment='enabled')
+    settings = _settings(args)
+    assert settings.model == 'Custom/v9' and settings.timestamp_alignment == 'enabled'
 
 
 def test_poll_failure_resumes_task_without_reupload_or_rebill(ali_server, tmp_path):

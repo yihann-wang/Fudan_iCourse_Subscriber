@@ -150,7 +150,8 @@ chmod 600 .env
 | `LLM_MAX_OUTPUT_TOKENS` | 单次输出预算，默认 65536 |
 | `API_TIMEOUT_MS` | 单次请求等待上限，毫秒；默认 1200000 |
 | `ASR_PROVIDER` | `openai`（默认兼容接口）或 `dashscope`（百炼录音文件识别） |
-| `ASR_BASE_URL`、`ASR_MODEL`、`ASR_API_KEY` | 语音服务基础地址、完整模型 ID、所选服务的密钥；百炼选 `fun-asr` 或 `paraformer-v2` |
+| `ASR_BASE_URL`、`ASR_MODEL`、`ASR_API_KEY` | 可配置的语音基础地址、完整模型 ID、所选服务的密钥；没有模型白名单，但模型必须支持所选接口协议 |
+| `ASR_TIMESTAMP_ALIGNMENT` | 仅百炼录音接口：`default`（默认不传）、`enabled`、`disabled`；开启前确认模型支持 |
 | `ASR_LANGUAGE`、`ASR_INITIAL_PROMPT` | 可选语言和术语提示；不支持的服务请留空 |
 | `ASR_RESPONSE_FORMAT` | 默认留空；可选 json、verbose_json、text、srt，须服务支持 |
 | `ASR_CHUNK_SECONDS` | 上传音频块最长时长，默认 300 秒，范围 30–1800 |

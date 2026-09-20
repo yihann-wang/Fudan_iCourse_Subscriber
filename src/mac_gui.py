@@ -33,6 +33,7 @@ from PySide6.QtWidgets import (
 )
 
 from .preferences import SECRET_FIELDS, Preferences, defaults, runtime_environment
+from .asr.types import DASHSCOPE_DEFAULT_MODEL, DASHSCOPE_MODEL_SUGGESTIONS
 from .storage_access import StorageAccessError, check_directory, check_pipeline_storage
 from .summary_settings import DEFAULT_OUTPUT_TOKENS, DEFAULT_TIMEOUT_MINUTES
 from .task_events import redact, set_secrets
@@ -161,8 +162,8 @@ class MainWindow(QMainWindow):
         reset_budget.clicked.connect(self.reset_note_budget)
         config.addRow("", reset_budget)
         provider = ScrollSafeComboBox()
-        provider.addItem("兼容语音服务（硅基流动 / Groq 等）", "openai")
-        provider.addItem("阿里云百炼（Fun-ASR / Paraformer，带字幕）", "dashscope")
+        provider.addItem("OpenAI 兼容音频接口（硅基流动 / Groq 等）", "openai")
+        provider.addItem("百炼录音文件接口（异步识别）", "dashscope")
         provider.setCurrentIndex(max(0, provider.findData(self.values.get("asr_provider", "openai"))))
         self.fields["asr_provider"] = provider
         config.addRow("语音服务", provider)
@@ -180,14 +181,23 @@ class MainWindow(QMainWindow):
         config.addRow("语音返回格式", response_format)
         self.add_text(config, "asr_dashscope_base_url", "百炼服务地址", "北京：https://dashscope.aliyuncs.com/api/v1")
         ali_model = ScrollSafeComboBox()
-        ali_model.addItem("Fun-ASR（fun-asr）", "fun-asr")
-        ali_model.addItem("Paraformer（paraformer-v2）", "paraformer-v2")
-        ali_model.setCurrentIndex(max(0, ali_model.findData(self.values.get("asr_dashscope_model", "fun-asr"))))
+        ali_model.setEditable(True)
+        ali_model.setInsertPolicy(QComboBox.InsertPolicy.NoInsert)
+        ali_model.addItems(DASHSCOPE_MODEL_SUGGESTIONS)
+        ali_model.setCurrentText(self.values.get("asr_dashscope_model", DASHSCOPE_DEFAULT_MODEL))
+        ali_model.lineEdit().setPlaceholderText("输入服务商提供的完整模型 ID；下拉项只是示例")
         self.fields["asr_dashscope_model"] = ali_model
         config.addRow("百炼语音模型", ali_model)
         self.add_text(config, "asr_dashscope_api_key", "百炼 API Key", "填写所选地域的百炼密钥，与硅基流动密钥分开保存", secret=True)
+        alignment = ScrollSafeComboBox()
+        for label, value in [("服务默认（推荐）", "default"), ("开启（模型支持时）", "enabled"), ("关闭", "disabled")]:
+            alignment.addItem(label, value)
+        alignment.setCurrentIndex(max(0, alignment.findData(self.values.get("asr_dashscope_timestamp_alignment", "default"))))
+        self.fields["asr_dashscope_timestamp_alignment"] = alignment
+        config.addRow("时间戳校准", alignment)
         ali_hint = QLabel("自动上传音频并生成原文和同步字幕。支持中断后继续查询。"
-                          "语言可留空，或填 zh,en；已有课程需勾选“重新生成已有转录和笔记”。")
+                          "模型需支持录音文件异步接口和带时间戳的结果；语言可留空自动识别。"
+                          "已有课程补字幕需勾选“重新生成已有转录和笔记”。")
         ali_hint.setWordWrap(True)
         config.addRow(ali_hint)
 
@@ -195,10 +205,10 @@ class MainWindow(QMainWindow):
             aliyun = provider.currentData() == "dashscope"
             for name in ("asr_base_url", "asr_model", "asr_api_key", "asr_prompt", "asr_response_format"):
                 config.setRowVisible(self.fields[name], not aliyun)
-            for name in ("asr_dashscope_base_url", "asr_dashscope_model", "asr_dashscope_api_key"):
+            for name in ("asr_dashscope_base_url", "asr_dashscope_model", "asr_dashscope_api_key", "asr_dashscope_timestamp_alignment"):
                 config.setRowVisible(self.fields[name], aliyun)
             config.setRowVisible(ali_hint, aliyun)
-            self.fields["asr_language"].setPlaceholderText("留空自动识别；或填 zh,en" if aliyun else "默认留空；服务支持时可填 zh 或 en")
+            self.fields["asr_language"].setPlaceholderText("留空自动识别；语言数量限制以所选模型为准" if aliyun else "默认留空；服务支持时可填 zh 或 en")
 
         provider.currentIndexChanged.connect(show_asr_provider)
         show_asr_provider()
@@ -302,7 +312,7 @@ class MainWindow(QMainWindow):
         values = dict(self.values)
         for name, widget in self.fields.items():
             if isinstance(widget, QComboBox):
-                values[name] = widget.currentData()
+                values[name] = widget.currentText().strip() if widget.isEditable() else widget.currentData()
             elif isinstance(widget, QCheckBox):
                 values[name] = widget.isChecked()
             elif isinstance(widget, QSpinBox):

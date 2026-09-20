@@ -3,9 +3,9 @@
 import argparse
 import importlib.metadata
 import json
+import os
 import platform
 import sys
-from dataclasses import replace
 from pathlib import Path
 
 from . import task_events as events
@@ -17,7 +17,7 @@ from .artifacts import (
     migrate_auxiliary,
 )
 from .asr import ASRSettings
-from .asr.types import DASHSCOPE_BASE_URL, DEFAULT_BASE_URL, DEFAULT_MODEL
+from .asr.types import DASHSCOPE_BASE_URL, DASHSCOPE_DEFAULT_MODEL, DEFAULT_BASE_URL, DEFAULT_MODEL
 from .storage_access import check_directory
 
 
@@ -49,13 +49,16 @@ def doctor():
 
 
 def _settings(args):
-    settings = ASRSettings.from_env()
-    values = {field: getattr(args, field) for field in ("provider", "base_url", "model", "response_format")
-              if getattr(args, field) is not None}
-    if args.provider is not None and args.provider != settings.provider:
-        values.setdefault("base_url", DASHSCOPE_BASE_URL if args.provider == "dashscope" else DEFAULT_BASE_URL)
-        values.setdefault("model", "fun-asr" if args.provider == "dashscope" else DEFAULT_MODEL)
-    return replace(settings, **values).resolved()
+    env = dict(os.environ)
+    if args.provider is not None and args.provider != env.get("ASR_PROVIDER", "openai"):
+        env.update(ASR_BASE_URL=DASHSCOPE_BASE_URL if args.provider == "dashscope" else DEFAULT_BASE_URL,
+                   ASR_MODEL=DASHSCOPE_DEFAULT_MODEL if args.provider == "dashscope" else DEFAULT_MODEL,
+                   ASR_TIMESTAMP_ALIGNMENT="default")
+    for field in ("provider", "base_url", "model", "response_format", "timestamp_alignment"):
+        value = getattr(args, field)
+        if value is not None:
+            env["ASR_" + field.upper()] = value
+    return ASRSettings.from_env(env)
 
 
 def main(argv=None):
@@ -78,6 +81,8 @@ def main(argv=None):
         command.add_argument("--base-url")
         command.add_argument("--provider", choices=["openai", "dashscope"])
         command.add_argument("--model")
+        command.add_argument("--timestamp-alignment", choices=["default", "enabled", "disabled"],
+                             help="百炼录音接口时间戳校准；默认不发送该可选参数")
         command.add_argument("--env-file", type=Path, help="读取指定配置；默认只使用环境变量")
         command.add_argument("--response-format", choices=["json", "verbose_json", "text", "srt"])
         if name == "transcribe":

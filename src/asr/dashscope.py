@@ -1,6 +1,6 @@
 """DashScope file ASR: private temporary upload, resumable tasks, real timing.
 
-The file API is shared by fun-asr and paraformer-v2. Bearer credentials only
+Models are passed through unchanged; compatibility is determined by the file API. Bearer credentials only
 go to the configured API; OSS uploads use the short-lived policy and result
 downloads use their signed URL. Neither URL nor policy is persisted or logged.
 """
@@ -168,10 +168,9 @@ class DashScopeAPI:
     def _storage_url(self, value):
         url = urlsplit(value)
         base = urlsplit(self.settings.base_url)
-        local_test = (base.hostname in {"localhost", "127.0.0.1", "::1"} and
-                      url.scheme == base.scheme and url.netloc == base.netloc)
+        same_origin = url.scheme == base.scheme and url.netloc == base.netloc
         if (url.username or url.password or url.fragment or not url.hostname or
-                not (local_test or (url.scheme == "https" and url.hostname.endswith(".aliyuncs.com")))):
+                not (same_origin or (url.scheme == "https" and url.hostname.endswith(".aliyuncs.com")))):
             raise SpeechAPIError("阿里云返回了非预期的文件地址，已停止传输。")
         return value
 
@@ -250,8 +249,8 @@ class DashScopeAPI:
             parameters = {"channel_id": [0]}
             if self.settings.language:
                 parameters["language_hints"] = [s for s in re.split(r"[,，\s]+", self.settings.language) if s]
-            if self.settings.model == "paraformer-v2":
-                parameters["timestamp_alignment_enabled"] = True
+            if self.settings.timestamp_alignment != "default":
+                parameters["timestamp_alignment_enabled"] = self.settings.timestamp_alignment == "enabled"
             state["phase"] = "submitting"
             save()  # A lost response must not silently submit a second billable job.
             try:

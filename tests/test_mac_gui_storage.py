@@ -104,3 +104,31 @@ def test_provider_switch_preserves_both_configurations_and_keys(qt_app):
     assert selected['asr_model'] == values['asr_model']
     assert runtime_environment(selected, {})['ASR_API_KEY'] == values['asr_api_key']
     window.close()
+
+
+def test_custom_model_survives_save_reopen_and_protocol_switch(qt_app, tmp_path):
+    class Vault:
+        values = {}
+
+        def get_password(self, service, key):
+            return self.values.get((service, key))
+
+        def set_password(self, service, key, value):
+            self.values[service, key] = value
+
+    path, vault = tmp_path / 'settings.json', Vault()
+    first = mac_gui.MainWindow(preferences=Preferences(path, vault), initial_values=defaults())
+    first.fields['asr_provider'].setCurrentIndex(1)
+    first.fields['asr_dashscope_model'].setCurrentText('Vendor/Custom-ASR-v7')
+    first.fields['asr_dashscope_timestamp_alignment'].setCurrentIndex(1)
+    assert first.save()
+    first.close()
+    second = mac_gui.MainWindow(preferences=Preferences(path, vault))
+    second.fields['asr_provider'].setCurrentIndex(0)
+    assert second.fields['asr_dashscope_timestamp_alignment'].isHidden()
+    second.fields['asr_provider'].setCurrentIndex(1)
+    assert second.collect()['asr_dashscope_model'] == 'Vendor/Custom-ASR-v7'
+    env = mac_gui.runtime_environment(second.collect(), {})
+    assert env['ASR_MODEL'] == 'Vendor/Custom-ASR-v7'
+    assert env['ASR_TIMESTAMP_ALIGNMENT'] == 'enabled'
+    second.close()

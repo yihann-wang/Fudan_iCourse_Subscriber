@@ -28,7 +28,7 @@ GitHub Actions 在 macOS 14、macOS 26 和 Linux 上检查锁定依赖、代码�
 | `src/pipeline.py`、`src/pipeline_state.py` | 下载 → 转录 → 笔记队列、SQLite 状态与锁 |
 | `src/icourse.py`、`src/webvpn.py` | 学校登录、课程目录与回放 |
 | `src/asr/`、`src/transcriber.py`、`src/media.py` | 兼容云端语音接口、可取消的网络进程、音频块缓存与可选字幕 |
-| `src/asr/dashscope.py` | Fun-ASR / Paraformer 私有上传、异步任务恢复、句子/词时间戳与字幕分组 |
+| `src/asr/dashscope.py` | 百炼录音协议：私有上传、异步任务恢复、句子/词时间戳；不限制模型 ID |
 | `src/summarizer.py` | 整课单次请求、重试与完整响应验证 |
 | `src/artifacts.py`、`src/summary_storage.py` | 校验、隐藏状态、原子写入与历史 |
 | `scripts/install_mac_runtime.py`、`scripts/create_mac_app.py` | 独立运行环境与本机启动器 |
@@ -37,6 +37,8 @@ GitHub Actions 在 macOS 14、macOS 26 和 Linux 上检查锁定依赖、代码�
 | `main.py`、数据库/邮件相关模块与 `tools/` | 保留的旧接口；新入口优先使用 `src.cli` |
 
 每个阶段默认一个 worker，阶段之间可重叠工作。ASR 子进程只处理 HTTP 请求，方便取消正在上传或等待响应的请求。取消会终止任务进程组；课程流水线互斥，安装器也检查同一把锁。
+
+语音扩展以协议为界：`ASR_PROVIDER` 选择传输适配器，模型 ID 与 HTTPS 基础地址可配置。`DASHSCOPE_MODEL_SUGGESTIONS` 仅控制下拉示例，不用于校验或分支；`timestamp_alignment` 是显式能力选项，默认不发送，不按模型名推断。添加同协议的新模型不需要修改代码；新增协议或结果结构则应添加适配器与上传、取消、恢复、结果完整性测试。通用 URL 校验、凭据隔离与存储地址约束仍然保留。
 
 桌面引擎使用 `ICOURSE_EVENTS=json` 和每次新建的 `ICOURSE_RUN_ID`。stdout 只传版本 1 的 JSON 行；普通输出重定向到 stderr，供诊断面板使用。事件中的 `seq` 由同一个锁按写入顺序递增，任务身份为 `(course_id, sub_id)`。下载和音频进度由同步工作线程的上下文带上身份，不依赖中文日志的措辞。GUI 忽略旧运行、重复事件和终态后的进度。
 

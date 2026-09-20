@@ -66,8 +66,8 @@ def test_gui_environment_is_isolated_and_explicit():
     assert base["WHISPER_DEVICE"] == "cuda"
 
 
-@pytest.mark.parametrize("model", ["Fun-ASR", "paraformer-v2"])
-@pytest.mark.parametrize("path", ["/api/v1", "/compatible-mode/v1"])
+@pytest.mark.parametrize("model", ["fun-asr", "Vendor/Custom-ASR-v7"])
+@pytest.mark.parametrize("path", ["/api/v1", "/api/v1/services/audio/asr/transcription"])
 def test_saved_legacy_aliyun_configuration_migrates_without_plaintext_keys(tmp_path, model, path):
     vault = MemoryKeyring()
     store = Preferences(tmp_path / "settings.json", vault)
@@ -75,11 +75,14 @@ def test_saved_legacy_aliyun_configuration_migrates_without_plaintext_keys(tmp_p
                 "asr_model": model, "asr_api_key": uuid4().hex,
                 "uis_psw": uuid4().hex, "llm_api_key_1": uuid4().hex}
     store.save(original)
+    legacy = json.loads(store.path.read_text())
+    legacy.pop("asr_provider")
+    store.path.write_text(json.dumps(legacy))
     before = store.path.read_bytes()
     loaded = store.load()
     assert store.path.read_bytes() == before  # Loading never modifies the vault or file.
     assert loaded["asr_provider"] == "dashscope"
-    assert loaded["asr_dashscope_model"] == model.lower()
+    assert loaded["asr_dashscope_model"] == model
     assert loaded["asr_dashscope_base_url"] == "https://dashscope.aliyuncs.com/api/v1"
     env = runtime_environment(loaded, {})
     assert env["ASR_PROVIDER"] == "dashscope"
@@ -96,7 +99,8 @@ def test_saved_legacy_aliyun_configuration_migrates_without_plaintext_keys(tmp_p
     {"asr_base_url": "https://dashscope.aliyuncs.com.example.invalid/api/v1"},
     {"asr_base_url": "https://dashscope.aliyuncs.com/api/v1?token=x"},
     {"asr_base_url": "https://dashscope.aliyuncs.com:bad/api/v1"},
-    {"asr_model": "Qwen3-ASR-1.7B"},
+    {"asr_base_url": "https://dashscope.aliyuncs.com/compatible-mode/v1"},
+    {"asr_model": ""},
     {"asr_dashscope_api_key": "separate-account"},
     {"asr_provider": "dashscope"},
 ])
@@ -106,6 +110,14 @@ def test_migration_preserves_other_providers_and_separate_accounts(changes):
     original = dict(values)
     migrate_dashscope_settings(values)
     assert values == original
+
+
+def test_explicit_protocol_and_model_are_never_rewritten_on_load(tmp_path):
+    store = Preferences(tmp_path / "settings.json", MemoryKeyring())
+    original = {**defaults(), "asr_base_url": "https://dashscope.aliyuncs.com/api/v1",
+                "asr_model": "Fun-ASR", "asr_api_key": uuid4().hex}
+    store.save(original)
+    assert store.load() == original
 
 
 @pytest.fixture

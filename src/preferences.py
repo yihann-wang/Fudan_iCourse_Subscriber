@@ -10,7 +10,7 @@ from urllib.parse import urlsplit, urlunsplit
 from platformdirs import user_config_path
 
 from .artifacts import atomic_write_json
-from .asr.types import DASHSCOPE_BASE_URL, DASHSCOPE_MODELS, DEFAULT_BASE_URL, DEFAULT_MODEL
+from .asr.types import DASHSCOPE_BASE_URL, DASHSCOPE_DEFAULT_MODEL, DEFAULT_BASE_URL, DEFAULT_MODEL, is_dashscope_host
 from .summary_settings import DEFAULT_OUTPUT_TOKENS, DEFAULT_TIMEOUT_MINUTES
 
 SERVICE = "Fudan iCourse Subscriber"
@@ -24,7 +24,8 @@ def defaults():
                 summary_dir=str(home / "笔记"), local_media="", asr_base_url=DEFAULT_BASE_URL, asr_model=DEFAULT_MODEL,
                 asr_api_key="", asr_language="", asr_prompt="", asr_response_format="",
                 asr_provider="openai", asr_dashscope_base_url=DASHSCOPE_BASE_URL,
-                asr_dashscope_model="fun-asr", asr_dashscope_api_key="",
+                asr_dashscope_model=DASHSCOPE_DEFAULT_MODEL, asr_dashscope_api_key="",
+                asr_dashscope_timestamp_alignment="default",
                 chunk_seconds=300, asr_max_upload_mb=20, asr_timeout_seconds=300, asr_retries=2,
                 llm_name_1="LLM", llm_api_key_1="", llm_base_url_1="", llm_models_1="",
                 llm_output_tokens=DEFAULT_OUTPUT_TOKENS,
@@ -37,23 +38,22 @@ def as_bool(value):
 
 
 def migrate_dashscope_settings(values):
-    """Recognize native file-ASR settings entered in the old compatible fields.
+    """Infer the protocol from an unambiguous legacy native API address.
 
     Only move credentials between fields for the same official API origin.
     This is an in-memory migration; normal transactional save persists it.
     """
     if values.get("asr_provider", "openai") != "openai":
         return
-    model = str(values.get("asr_model", "")).strip().lower()
-    if model not in DASHSCOPE_MODELS:
+    model = str(values.get("asr_model", "")).strip()
+    if not model:
         return
     try:
         url = urlsplit(str(values.get("asr_base_url", "")).strip().rstrip("/"))
-        official = (url.hostname in {"dashscope.aliyuncs.com", "dashscope-intl.aliyuncs.com"}
-                    or (url.hostname or "").endswith(".maas.aliyuncs.com"))
+        official = is_dashscope_host(url.hostname)
         if (not official or url.scheme != "https" or url.username or url.password or url.port
                 or url.query or url.fragment or url.path not in {
-                    "", "/api/v1", "/compatible-mode/v1", "/api/v1/services/audio/asr/transcription"}):
+                    "/api/v1", "/api/v1/services/audio/asr/transcription"}):
             return
     except ValueError:
         return
@@ -78,6 +78,7 @@ class Preferences:
     def load(self, legacy_path=None):
         values = defaults()
         source = self.path if self.path.exists() else Path(legacy_path) if legacy_path else None
+        saved = {}
         if source and source.exists():
             saved = json.loads(source.read_text(encoding="utf-8"))
             values.update({k: v for k, v in saved.items() if k in values})
@@ -90,7 +91,8 @@ class Preferences:
                 values[field] = defaults()[field]
         for field in ("overwrite", "redo_notes", "keep_awake"):
             values[field] = as_bool(values[field])
-        migrate_dashscope_settings(values)
+        if "asr_provider" not in saved:
+            migrate_dashscope_settings(values)
         return values
 
     def save(self, values):
@@ -127,7 +129,8 @@ def runtime_environment(values, base=None):
         env[key] = str(values.get(field, defaults().get(field, "")))
     if env["ASR_PROVIDER"] == "dashscope":
         for field, key in (("asr_dashscope_base_url", "ASR_BASE_URL"),
-                           ("asr_dashscope_model", "ASR_MODEL"), ("asr_dashscope_api_key", "ASR_API_KEY")):
+                           ("asr_dashscope_model", "ASR_MODEL"), ("asr_dashscope_api_key", "ASR_API_KEY"),
+                           ("asr_dashscope_timestamp_alignment", "ASR_TIMESTAMP_ALIGNMENT")):
             env[key] = str(values.get(field, defaults()[field]))
         env["ASR_INITIAL_PROMPT"] = ""
         env["ASR_RESPONSE_FORMAT"] = ""  # File ASR always requests its native timed JSON.
