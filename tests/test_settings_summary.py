@@ -5,7 +5,7 @@ from uuid import uuid4
 import pytest
 
 from src.config import LLMProvider
-from src.preferences import Preferences, SECRET_FIELDS, defaults, runtime_environment
+from src.preferences import Preferences, SECRET_FIELDS, defaults, migrate_dashscope_settings, runtime_environment
 from src.summarizer import Summarizer, TruncatedSummaryError
 
 
@@ -64,6 +64,48 @@ def test_gui_environment_is_isolated_and_explicit():
     assert "ASR_BACKEND" not in env and env["ASR_MODEL"] == defaults()["asr_model"]
     assert env["PATH"] == "/bin"
     assert base["WHISPER_DEVICE"] == "cuda"
+
+
+@pytest.mark.parametrize("model", ["Fun-ASR", "paraformer-v2"])
+@pytest.mark.parametrize("path", ["/api/v1", "/compatible-mode/v1"])
+def test_saved_legacy_aliyun_configuration_migrates_without_plaintext_keys(tmp_path, model, path):
+    vault = MemoryKeyring()
+    store = Preferences(tmp_path / "settings.json", vault)
+    original = {**defaults(), "asr_base_url": "https://dashscope.aliyuncs.com" + path,
+                "asr_model": model, "asr_api_key": uuid4().hex,
+                "uis_psw": uuid4().hex, "llm_api_key_1": uuid4().hex}
+    store.save(original)
+    before = store.path.read_bytes()
+    loaded = store.load()
+    assert store.path.read_bytes() == before  # Loading never modifies the vault or file.
+    assert loaded["asr_provider"] == "dashscope"
+    assert loaded["asr_dashscope_model"] == model.lower()
+    assert loaded["asr_dashscope_base_url"] == "https://dashscope.aliyuncs.com/api/v1"
+    env = runtime_environment(loaded, {})
+    assert env["ASR_PROVIDER"] == "dashscope"
+    assert env["ASR_API_KEY"] == original["asr_api_key"]
+    store.save(loaded)
+    restored = store.load()
+    assert restored == loaded
+    assert all(restored[k] == original[k] for k in ("uis_psw", "llm_api_key_1", "asr_api_key"))
+    assert all(original[k] not in store.path.read_text() for k in ("uis_psw", "llm_api_key_1", "asr_api_key"))
+
+
+@pytest.mark.parametrize("changes", [
+    {"asr_base_url": "https://api.siliconflow.cn/v1"},
+    {"asr_base_url": "https://dashscope.aliyuncs.com.example.invalid/api/v1"},
+    {"asr_base_url": "https://dashscope.aliyuncs.com/api/v1?token=x"},
+    {"asr_base_url": "https://dashscope.aliyuncs.com:bad/api/v1"},
+    {"asr_model": "Qwen3-ASR-1.7B"},
+    {"asr_dashscope_api_key": "separate-account"},
+    {"asr_provider": "dashscope"},
+])
+def test_migration_preserves_other_providers_and_separate_accounts(changes):
+    values = {**defaults(), "asr_base_url": "https://dashscope.aliyuncs.com/api/v1",
+              "asr_model": "fun-asr", "asr_api_key": uuid4().hex, **changes}
+    original = dict(values)
+    migrate_dashscope_settings(values)
+    assert values == original
 
 
 @pytest.fixture

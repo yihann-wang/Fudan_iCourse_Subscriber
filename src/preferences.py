@@ -5,11 +5,12 @@ import os
 import re
 import uuid
 from pathlib import Path
+from urllib.parse import urlsplit, urlunsplit
 
 from platformdirs import user_config_path
 
 from .artifacts import atomic_write_json
-from .asr.types import DASHSCOPE_BASE_URL, DEFAULT_BASE_URL, DEFAULT_MODEL
+from .asr.types import DASHSCOPE_BASE_URL, DASHSCOPE_MODELS, DEFAULT_BASE_URL, DEFAULT_MODEL
 from .summary_settings import DEFAULT_OUTPUT_TOKENS, DEFAULT_TIMEOUT_MINUTES
 
 SERVICE = "Fudan iCourse Subscriber"
@@ -33,6 +34,36 @@ def defaults():
 
 def as_bool(value):
     return value is True or str(value).lower() in {"1", "true", "yes"}
+
+
+def migrate_dashscope_settings(values):
+    """Recognize native file-ASR settings entered in the old compatible fields.
+
+    Only move credentials between fields for the same official API origin.
+    This is an in-memory migration; normal transactional save persists it.
+    """
+    if values.get("asr_provider", "openai") != "openai":
+        return
+    model = str(values.get("asr_model", "")).strip().lower()
+    if model not in DASHSCOPE_MODELS:
+        return
+    try:
+        url = urlsplit(str(values.get("asr_base_url", "")).strip().rstrip("/"))
+        official = (url.hostname in {"dashscope.aliyuncs.com", "dashscope-intl.aliyuncs.com"}
+                    or (url.hostname or "").endswith(".maas.aliyuncs.com"))
+        if (not official or url.scheme != "https" or url.username or url.password or url.port
+                or url.query or url.fragment or url.path not in {
+                    "", "/api/v1", "/compatible-mode/v1", "/api/v1/services/audio/asr/transcription"}):
+            return
+    except ValueError:
+        return
+    key = values.get("asr_api_key", "")
+    existing = values.get("asr_dashscope_api_key", "")
+    if existing and existing != key:
+        return  # Never replace an independently configured account.
+    values.update(asr_provider="dashscope", asr_dashscope_model=model,
+                  asr_dashscope_base_url=urlunsplit((url.scheme, url.netloc, "/api/v1", "", "")),
+                  asr_dashscope_api_key=key)
 
 
 class Preferences:
@@ -59,6 +90,7 @@ class Preferences:
                 values[field] = defaults()[field]
         for field in ("overwrite", "redo_notes", "keep_awake"):
             values[field] = as_bool(values[field])
+        migrate_dashscope_settings(values)
         return values
 
     def save(self, values):
