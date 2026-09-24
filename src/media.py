@@ -13,6 +13,8 @@ from array import array
 from dataclasses import dataclass
 from pathlib import Path
 
+from .media_integrity import check_mp4_completeness
+
 
 class CancelledError(RuntimeError):
     pass
@@ -82,6 +84,11 @@ def run_media(cmd, *, timeout, cancel=None):
 
 
 def probe(path, *, headers=None, timeout=30, cancel=None):
+    if "://" not in str(path):
+        try:
+            check_mp4_completeness(path)
+        except OSError as exc:
+            raise RuntimeError("无法读取本地媒体文件；请检查文件是否存在及访问权限。") from exc
     cmd = [resolve_media_tool("ffprobe"), "-v", "error"]
     if headers:
         cmd += ["-headers", headers]
@@ -170,7 +177,8 @@ def decode(input_cmd, output, *, timeout=7200, cancel=None, source_duration=None
             source_duration = h * 3600 + m * 60 + s
     if source_duration and duration < source_duration - max(2.0, source_duration * 0.01):
         raise IncompleteAudioError(
-            f"音频仅收到 {duration:.1f}/{source_duration:.1f} 秒，请重试。",
+            f"提取出的音频不完整：{duration:.1f}/{source_duration:.1f} 秒。"
+            "请检查录像能否播放至结尾；下载的录像请重新下载后再转录。",
             duration, source_duration,
         )
     warnings = ()

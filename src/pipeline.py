@@ -816,6 +816,7 @@ def _download_video_with_progress(client, video_url: str, output_path: Path,
 
     from src.media import probe
     try:
+        events.progress("正在检查录像完整性", phase="download")
         probe(tmp_path)
         _begin_artifact(output_path)
         os.replace(tmp_path, output_path)

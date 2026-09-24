@@ -379,7 +379,14 @@ class ICourseClient:
                 f"Incomplete download: got {downloaded} of {total} bytes"
             )
 
-        os.replace(tmp_path, output_path)
+        from .media import probe
+        try:
+            probe(tmp_path)
+            os.replace(tmp_path, output_path)
+        finally:
+            resp.close()
+            if os.path.exists(tmp_path):
+                os.remove(tmp_path)
         elapsed = time.time() - t0
         size_mb = downloaded / (1024 * 1024)
         print(f"    Downloaded: {size_mb:.1f}MB in {elapsed:.0f}s")

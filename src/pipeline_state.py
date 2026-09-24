@@ -17,6 +17,7 @@ from .artifacts import (
     internal_path,
     migrate_auxiliary,
 )
+from .media_integrity import IncompleteMediaError, check_mp4_completeness
 
 
 class PipelineState:
@@ -122,6 +123,13 @@ def valid_artifact(path):
     path = Path(path)
     if not path.is_file() or path.stat().st_size == 0:
         return False
+    if path.suffix.lower() == ".mp4":
+        try:
+            # Older releases could hash a truncated download and call it valid.
+            # Check boundaries before trusting either that hash or a legacy file.
+            check_mp4_completeness(path)
+        except (IncompleteMediaError, OSError):
+            return False
     legacy_marker = path.with_suffix(path.suffix + ".icourse.json")
     marker = internal_path(legacy_marker)
     if not marker.exists() and legacy_marker.exists():
