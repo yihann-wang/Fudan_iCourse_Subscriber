@@ -10,7 +10,7 @@ import pytest
 
 from src.asr.client import CloudWorker
 from src.asr.cloud import SpeechAPIError
-from src.asr.dashscope import DashScopeAPI, parse_dashscope_result
+from src.asr.dashscope import DashScopeAPI, _is_empty_recognition, parse_dashscope_result
 from src.asr.types import ASRSettings, DASHSCOPE_BASE_URL
 from src.preferences import defaults, runtime_environment
 from src.transcriber import write_srt
@@ -366,5 +366,119 @@ def test_chunk_merge_offsets_timestamps_and_preserves_completed_audio(tmp_path, 
         assert len(calls) == 3 and not any(p.exists() for p in calls)
         assert transcriber.transcribe_result(media).text == result.text
         assert len(calls) == 3
+    finally:
+        transcriber.close()
+
+
+@pytest.mark.parametrize('code', ['ASR_RESPONSE_HAVE_NO_WORDS', 'SUCCESS_WITH_NO_VALID_FRAGMENT'])
+@pytest.mark.parametrize('shape', ['task', 'subtask', 'failed_subtask'])
+def test_documented_empty_outcome_is_checkpointed_not_rebilled(ali_server, tmp_path, code, shape):
+    media, state, settings = setup(ali_server, tmp_path)
+    output = dict(task_status='FAILED', code=code)
+    if shape != 'task':
+        output = dict(task_status='SUCCEEDED' if shape == 'subtask' else 'FAILED',
+                      results=[dict(subtask_status='FAILED', code=code)])
+    ali_server['responses'] = [(200, policy(ali_server)), (200, {}),
+        (200, {'output': {'task_id': 'empty-job'}}), (200, {'output': output})]
+    worker = CloudWorker(settings)
+    try:
+        for _ in range(2):
+            result = worker.request(media, duration=3, task_path=state)
+            assert result['text'] == '' and result['segments'] == []
+        assert len(ali_server['requests']) == 4
+        assert json.loads(state.read_text())['phase'] == 'no_words'
+    finally:
+        worker.close()
+
+
+@pytest.mark.parametrize('output', [
+    dict(task_status='CANCELED', code='ASR_RESPONSE_HAVE_NO_WORDS'),
+    dict(task_status='RUNNING', code='ASR_RESPONSE_HAVE_NO_WORDS'),
+    dict(task_status='FAILED', code='FILE_CHECK_FAILED', message='ASR_RESPONSE_HAVE_NO_WORDS'),
+    dict(task_status='FAILED', code='InvalidApiKey', results=[
+        dict(subtask_status='FAILED', code='ASR_RESPONSE_HAVE_NO_WORDS')]),
+    dict(task_status='FAILED', results=[dict(subtask_status='FAILED', code='ASR_RESPONSE_HAVE_NO_WORDS'),
+                                      dict(subtask_status='FAILED', code='FILE_DOWNLOAD_FAILED')]),
+    dict(task_status='FAILED', results=[]),
+    dict(task_status='SUCCEEDED', code='ASR_RESPONSE_HAVE_NO_WORDS'),
+    dict(task_status='FAILED', code=['ASR_RESPONSE_HAVE_NO_WORDS']),
+])
+def test_other_failures_or_malformed_results_are_not_empty_recognition(output):
+    assert not _is_empty_recognition(output)
+
+
+def test_previous_no_words_failure_recovers_without_network(ali_server, tmp_path, monkeypatch):
+    from src.artifacts import file_sha256
+    media, state, settings = setup(ali_server, tmp_path)
+    failure = state.with_suffix('.failure.json')
+    failure.write_text(json.dumps(dict(fingerprint=settings.fingerprint, audio_sha256=file_sha256(media),
+        duration=3, phase='failed', task_status='FAILED', task_id='old-job',
+        error_codes=['ASR_RESPONSE_HAVE_NO_WORDS'])))
+    api = DashScopeAPI(settings)
+    monkeypatch.setattr(api, '_json', lambda *a, **kw: pytest.fail('No new request for confirmed empty result'))
+    try:
+        assert api.transcribe(media, 3, task_path=state) == dict(text='', segments=[], language='')
+        assert json.loads(state.read_text())['task_id'] == 'old-job'
+        assert not failure.exists()
+    finally:
+        api.close()
+
+
+@pytest.mark.parametrize('change', [dict(fingerprint='other'), dict(audio_sha256='other'), dict(duration=4),
+    dict(task_status='CANCELED'), dict(error_codes=['FILE_CHECK_FAILED']), dict(task_id='../unsafe')])
+def test_failure_recovery_requires_exact_audio_and_settings(ali_server, tmp_path, change):
+    from src.artifacts import file_sha256
+    media, state, settings = setup(ali_server, tmp_path)
+    failed = dict(fingerprint=settings.fingerprint, audio_sha256=file_sha256(media),
+        duration=3, phase='failed', task_status='FAILED', task_id='old-job',
+        error_codes=['ASR_RESPONSE_HAVE_NO_WORDS'])
+    failed.update(change)
+    state.with_suffix('.failure.json').write_text(json.dumps(failed))
+    ali_server['responses'] = [(200, policy(ali_server)), (200, {}),
+        (200, {'output': {'task_id': 'new-job'}}), (200, success(ali_server)), (200, transcript())]
+    api = DashScopeAPI(settings)
+    try:
+        assert api.transcribe(media, 3, task_path=state)['text']
+        assert len(ali_server['requests']) == 5
+    finally:
+        api.close()
+
+
+@pytest.mark.parametrize('all_empty', [False, True])
+def test_empty_cloud_block_continues_with_visible_gap_and_correct_subtitles(ali_server, tmp_path, all_empty):
+    import wave
+    from src.transcriber import Transcriber
+    media = tmp_path / 'lecture.wav'
+    with wave.open(str(media), 'wb') as wav:
+        wav.setparams((1, 2, 16000, 0, 'NONE', 'not compressed'))
+        wav.writeframes(b'\x10\x10' * 16000 * 65)
+    _, _, settings = setup(ali_server, tmp_path)
+    settings = replace(settings, chunk_seconds=30)
+    transcriber = Transcriber(settings, cache_dir=tmp_path / 'cache')
+    for index, duration in enumerate([30, 30, 5]):
+        replies = [(200, policy(ali_server)), (200, {}), (200, {'output': {'task_id': f'job-{index}'}})]
+        if all_empty or index == 1:
+            replies.append((200, {'output': dict(task_status='FAILED', code='ASR_RESPONSE_HAVE_NO_WORDS')}))
+        else:
+            replies.extend([(200, success(ali_server)), (200, transcript(f'第{index + 1}块课堂内容', duration))])
+        ali_server['responses'].extend(replies)
+    try:
+        if all_empty:
+            with pytest.raises(RuntimeError, match='未识别到语音'):
+                transcriber.transcribe_result(media)
+            assert transcriber.last_result is None
+            assert not list((tmp_path / 'cache').rglob('*.json'))
+        else:
+            result = transcriber.transcribe_result(media)
+            assert '第1块课堂内容' in result.text and '第3块课堂内容' in result.text
+            assert '00:00:30,000–00:01:00,000 未识别到文字' in result.text
+            assert any('1 段音频未识别到文字' in warning for warning in result.warnings)
+            assert [s.start for s in result.segments] == pytest.approx([.12, 60.12])
+            subtitles = tmp_path / 'lecture.srt'
+            transcriber.write_srt(subtitles)
+            assert '00:01:00,120' in subtitles.read_text() and '未识别' not in subtitles.read_text()
+            count = len(ali_server['requests'])
+            assert transcriber.transcribe_result(media).text == result.text
+            assert len(ali_server['requests']) == count
     finally:
         transcriber.close()

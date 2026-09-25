@@ -19,6 +19,27 @@ from ..artifacts import atomic_write_json, file_sha256
 from .cloud import SpeechAPIError, parse_response
 
 
+# Documented file-ASR outcomes, not model names or heuristic message matching.
+_EMPTY_RESULT_CODES = frozenset({"ASR_RESPONSE_HAVE_NO_WORDS", "SUCCESS_WITH_NO_VALID_FRAGMENT"})
+
+
+def _is_empty_recognition(output):
+    """Only normalize explicit no-recognition outcomes for our single file."""
+    if output.get("task_status") not in ("FAILED", "SUCCEEDED"):
+        return False
+    sources = [output]
+    results = output.get("results")
+    if results is not None:
+        if (not isinstance(results, list) or len(results) != 1 or
+                not isinstance(results[0], dict) or results[0].get("subtask_status") != "FAILED"):
+            return False
+        sources.append(results[0])
+    elif output.get("task_status") != "FAILED":
+        return False
+    codes = [source["code"] for source in sources if source.get("code") not in (None, "")]
+    return bool(codes) and all(isinstance(code, str) and code in _EMPTY_RESULT_CODES for code in codes)
+
+
 def _content(text):
     return re.sub(r"\W+", "", text, flags=re.UNICODE)
 
@@ -258,6 +279,33 @@ class DashScopeAPI:
             if progress:
                 progress(dict(event="progress", message=message))
 
+        def finish(payload):
+            state["result"] = payload
+            save()  # Survives interruption before the parent saves its chunk.
+            if task_path:
+                task_path.with_suffix(".failure.json").unlink(missing_ok=True)
+            return payload
+
+        # Version 0.6.4 retained a confirmed no-words outcome as a failure.
+        # Reuse it only for exactly the same encoded audio and ASR settings.
+        if task_path and not task_path.exists():
+            failure_path = task_path.with_suffix(".failure.json")
+            try:
+                failed = json.loads(failure_path.read_text())
+            except (OSError, ValueError):
+                failed = None
+            if isinstance(failed, dict):
+                codes = failed.get("error_codes")
+                if (all(failed.get(k) == v for k, v in identity.items())
+                        and failed.get("phase") == "failed" and failed.get("task_status") == "FAILED"
+                        and isinstance(failed.get("task_id"), str)
+                        and re.fullmatch(r"[A-Za-z0-9_-]{1,200}", failed["task_id"])
+                        and isinstance(codes, list) and codes
+                        and all(isinstance(c, str) and c in _EMPTY_RESULT_CODES for c in codes)):
+                    state.update(task_id=failed["task_id"], phase="no_words")
+                    notice("阿里云转录 · 复用已确认的空识别结果，将标记时间段并继续")
+                    return finish(dict(text="", segments=[], language=""))
+
         if task_path and task_path.exists():
             try:
                 state = json.loads(task_path.read_text())
@@ -308,6 +356,10 @@ class DashScopeAPI:
             if not isinstance(output, dict):
                 raise SpeechAPIError("阿里云任务响应格式无效，已保留任务编号。")
             status = output.get("task_status")
+            if _is_empty_recognition(output):
+                state["phase"] = "no_words"
+                notice("阿里云转录 · 本块未识别到文字，将标记时间段并继续")
+                return finish(dict(text="", segments=[], language=""))
             if status == "SUCCEEDED":
                 results = output.get("results")
                 if not isinstance(results, list) or len(results) != 1 or not isinstance(results[0], dict):
@@ -317,11 +369,7 @@ class DashScopeAPI:
                 url = self._storage_url(results[0].get("transcription_url", ""))
                 notice("阿里云转录 · 正在获取文字和字幕时间戳")
                 payload = parse_dashscope_result(self._json("GET", url, retry=True, progress=progress), duration)
-                state["result"] = payload
-                save()  # Keep until the parent has atomically stored its chunk checkpoint.
-                if task_path:
-                    task_path.with_suffix(".failure.json").unlink(missing_ok=True)
-                return payload
+                return finish(payload)
             if status in ("FAILED", "CANCELED"):
                 self._task_failure(output, state, task_path)
             if status not in ("PENDING", "RUNNING"):
