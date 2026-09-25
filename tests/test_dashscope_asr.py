@@ -201,6 +201,52 @@ def test_failed_subtask_is_not_accepted_as_success(ali_server, tmp_path):
     assert len(ali_server['requests']) == 4
 
 
+@pytest.mark.parametrize('status', ['FAILED', 'CANCELED', 'SUCCEEDED'])
+def test_failure_preserves_codes_without_response_secrets(ali_server, tmp_path, status):
+    media, state, settings = setup(ali_server, tmp_path)
+    unsafe = settings.api_key + ' https://example.invalid/audio?Signature=private source transcript'
+    output = dict(task_status=status, code='RecognitionFailed', message=unsafe,
+                  results=[dict(subtask_status='FAILED', code='AUDIO_DECODE_FAILED',
+                                message=unsafe, file_url=unsafe)])
+    ali_server['responses'] = [(200, policy(ali_server)), (200, {}),
+        (200, {'output': {'task_id': 'failed-job'}}), (200, {'output': output})]
+    api = DashScopeAPI(settings)
+    try:
+        with pytest.raises(SpeechAPIError, match='AUDIO_DECODE_FAILED') as error:
+            api.transcribe(media, 3, task_path=state)
+        failure = state.with_suffix('.failure.json')
+        data = json.loads(failure.read_text())
+        assert data['task_id'] == 'failed-job'
+        assert data['error_codes'] == ['RecognitionFailed', 'AUDIO_DECODE_FAILED']
+        assert data['task_status'] == ('CANCELED' if status == 'CANCELED' else 'FAILED')
+        assert failure.stat().st_mode & 0o777 == 0o600
+        combined = str(error.value) + failure.read_text()
+        for secret in (settings.api_key, 'https://', 'Signature', 'source transcript'):
+            assert secret not in combined
+        assert not state.exists()  # A confirmed failure permits an explicit retry.
+        ali_server['responses'] = [(200, policy(ali_server)), (200, {}),
+            (200, {'output': {'task_id': 'retry-job'}}), (200, success(ali_server)), (200, transcript())]
+        assert api.transcribe(media, 3, task_path=state)['text']
+        assert not failure.exists()
+    finally:
+        api.close()
+
+
+@pytest.mark.parametrize('code', ['https://private.invalid/secret', 'sk-do-not-display', None, 'x' * 101])
+def test_invalid_error_codes_are_not_exposed(ali_server, tmp_path, code):
+    media, state, settings = setup(ali_server, tmp_path)
+    ali_server['responses'] = [(200, policy(ali_server)), (200, {}),
+        (200, {'output': {'task_id': 'failed-job'}}),
+        (200, {'output': {'task_status': 'FAILED', 'code': code, 'message': settings.api_key}})]
+    api = DashScopeAPI(settings)
+    try:
+        with pytest.raises(SpeechAPIError, match='服务未提供可安全显示的错误码'):
+            api.transcribe(media, 3, task_path=state)
+    finally:
+        api.close()
+    assert json.loads(state.with_suffix('.failure.json').read_text())['error_codes'] == []
+
+
 def test_check_only_requests_upload_policy(ali_server, tmp_path):
     _, _, settings = setup(ali_server, tmp_path)
     ali_server['responses'] = [(200, policy(ali_server))]

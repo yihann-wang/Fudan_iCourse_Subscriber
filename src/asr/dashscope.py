@@ -130,6 +130,33 @@ class DashScopeAPI:
     def close(self):
         self.session.close()
 
+    def _task_failure(self, output, state, task_path, *, subtask=False):
+        # Service messages can contain signed URLs, credentials or source text.
+        # Keep only bounded error codes and the already validated task identity.
+        details = []
+        results = output.get("results")
+        sources = [item for item in results if isinstance(item, dict)
+                   and item.get("subtask_status") == "FAILED"] if isinstance(results, list) else []
+        for source in [output, *sources]:
+            code = source.get("code")
+            if (isinstance(code, str) and re.fullmatch(r"[A-Za-z0-9_.:-]{1,100}", code)
+                    and not code.lower().startswith("sk-")
+                    and (not self.settings.api_key or self.settings.api_key not in code)
+                    and code not in details):
+                details.append(code)
+        details = details[:4]
+        if task_path:
+            atomic_write_json(task_path.with_suffix(".failure.json"), {
+                **{key: state[key] for key in ("fingerprint", "audio_sha256", "duration", "task_id")},
+                "phase": "failed", "error_codes": details,
+                "task_status": "CANCELED" if output.get("task_status") == "CANCELED" else "FAILED",
+            }, private=True)
+            task_path.unlink(missing_ok=True)
+        label = "阿里云音频子任务失败" if subtask else "阿里云转录任务失败或已取消"
+        reason = "、".join(details) if details else "服务未提供可安全显示的错误码"
+        saved = "失败诊断已保留；" if task_path else ""
+        raise SpeechAPIError(f"{label}（{reason}）。{saved}可据错误码核对后重试，已完成块无需重做。")
+
     def _json(self, method, url, *, authenticated=False, retry=False, progress=None, **kwargs):
         headers = dict(kwargs.pop("headers", {}))
         if authenticated:
@@ -286,19 +313,17 @@ class DashScopeAPI:
                 if not isinstance(results, list) or len(results) != 1 or not isinstance(results[0], dict):
                     raise SpeechAPIError("阿里云任务没有返回唯一的音频结果。")
                 if results[0].get("subtask_status") != "SUCCEEDED":
-                    if task_path:
-                        task_path.unlink(missing_ok=True)
-                    raise SpeechAPIError("阿里云音频子任务失败，未保存为完成结果，请核对模型权限或音频格式。")
+                    self._task_failure(output, state, task_path, subtask=True)
                 url = self._storage_url(results[0].get("transcription_url", ""))
                 notice("阿里云转录 · 正在获取文字和字幕时间戳")
                 payload = parse_dashscope_result(self._json("GET", url, retry=True, progress=progress), duration)
                 state["result"] = payload
                 save()  # Keep until the parent has atomically stored its chunk checkpoint.
+                if task_path:
+                    task_path.with_suffix(".failure.json").unlink(missing_ok=True)
                 return payload
             if status in ("FAILED", "CANCELED"):
-                if task_path:
-                    task_path.unlink(missing_ok=True)
-                raise SpeechAPIError("阿里云转录任务失败或已取消，可重试；请核对模型权限、余额和音频格式。")
+                self._task_failure(output, state, task_path)
             if status not in ("PENDING", "RUNNING"):
                 raise SpeechAPIError("阿里云任务状态无效或已过期，已保留任务编号；请核对云端任务后重试。")
             if status != previous_status:
