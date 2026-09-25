@@ -115,10 +115,10 @@ def test_download_does_not_accept_truncation_even_if_http_length_matches(tmp_pat
     headers = {"content-type": "video/mp4"}
     if has_length:
         headers["content-length"] = str(len(body))
-    response = SimpleNamespace(headers=headers, close=Mock(), raise_for_status=Mock(),
+    response = SimpleNamespace(status_code=200, headers=headers, close=Mock(), raise_for_status=Mock(),
                                iter_content=lambda **kw: iter([body]))
     client = ICourseClient(None)
-    monkeypatch.setattr(client, "get_video_response", lambda *_: response)
+    monkeypatch.setattr(client, "get_video_response", lambda *_, **kw: response)
     with pytest.raises(IncompleteMediaError):
         if legacy:
             client.download_video("https://example.invalid/video", str(video))
@@ -150,7 +150,7 @@ def test_retry_failed_transcription_redownloads_truncated_video(tmp_path, monkey
         stream.setparams((1, 2, 16000, 0, "NONE", "not compressed"))
         stream.writeframes(b"\0\0" * 16000)
     complete = audio.getvalue()
-    response = SimpleNamespace(headers={"content-length": str(len(complete))},
+    response = SimpleNamespace(status_code=200, headers={"content-length": str(len(complete))},
         close=Mock(), raise_for_status=Mock(), iter_content=lambda **kw: iter([complete]))
     monkeypatch.setattr("src.pipeline._login_with_retry", lambda *a, **kw: object())
     monkeypatch.setattr(ICourseClient, "get_course_detail", lambda *a: dict(title="Test", lectures=[
@@ -158,7 +158,7 @@ def test_retry_failed_transcription_redownloads_truncated_video(tmp_path, monkey
         dict(sub_id="123457", sub_title="其他课", has_playback=True)]))
     monkeypatch.setattr(ICourseClient, "get_video_url", lambda *a: "https://example.invalid/video")
 
-    def download(*_):
+    def download(*_, **kw):
         calls.append("download")
         assert video.read_bytes() == recording()[:-64]
         return response

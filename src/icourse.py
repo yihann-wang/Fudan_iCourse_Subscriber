@@ -6,7 +6,6 @@ and video downloads through WebVPN.
 """
 
 import hashlib
-import os
 import time
 import uuid
 from urllib.parse import urlparse
@@ -340,54 +339,9 @@ class ICourseClient:
         output_path: str,
         chunk_size: int = 8192,
     ) -> str:
-        """Download a video file from the given URL.
+        """Use the same verified, resumable download path as the desktop pipeline."""
+        from .video_download import download_video
 
-        If video_url is a WebVPN URL, uses get_raw; otherwise uses get.
-        Returns the output file path.
-        """
-        os.makedirs(os.path.dirname(output_path) or ".", exist_ok=True)
-
-        tmp_path = output_path + ".tmp"
-        t0 = time.time()
-
-        resp = self.get_video_response(video_url)
-
-        resp.raise_for_status()
-
-        total = int(resp.headers.get("content-length", 0))
-        downloaded = 0
-
-        with open(tmp_path, "wb") as f:
-            for chunk in resp.iter_content(chunk_size=chunk_size):
-                f.write(chunk)
-                downloaded += len(chunk)
-                if total:
-                    pct = downloaded * 100 // total
-                    print(
-                        f"\r    Downloading: {pct}% "
-                        f"({downloaded // 1024 // 1024}MB/"
-                        f"{total // 1024 // 1024}MB)",
-                        end="",
-                        flush=True,
-                    )
-
-        print()  # newline after progress
-
-        if total and downloaded < total:
-            os.remove(tmp_path)
-            raise RuntimeError(
-                f"Incomplete download: got {downloaded} of {total} bytes"
-            )
-
-        from .media import probe
-        try:
-            probe(tmp_path)
-            os.replace(tmp_path, output_path)
-        finally:
-            resp.close()
-            if os.path.exists(tmp_path):
-                os.remove(tmp_path)
-        elapsed = time.time() - t0
-        size_mb = downloaded / (1024 * 1024)
-        print(f"    Downloaded: {size_mb:.1f}MB in {elapsed:.0f}s")
+        download_video(self, video_url, output_path, chunk_size=chunk_size,
+                       message=lambda text: print(f"    {text}"))
         return output_path

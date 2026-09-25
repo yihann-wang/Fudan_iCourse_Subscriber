@@ -21,6 +21,7 @@ def test_all_stages_same_title_and_cached_rerun(monkeypatch, tmp_path, capsys):
     calls = {"download": 0, "asr": 0, "summary": 0}
 
     class Response:
+        status_code = 200
         headers = {"content-type": "video/mp4", "content-length": str(len(audio.getvalue()))}
         def raise_for_status(self):
             pass

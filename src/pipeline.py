@@ -734,95 +734,48 @@ def _download_video_with_progress(client, video_url: str, output_path: Path,
                                    sub_id: str | None = None,
                                    tag: str = "", prog_key: str | None = None,
                                    title: str = "") -> Path:
-    """Download one video with a refreshable progress line.
+    """Download through the shared resumable transport, with sparse UI ticks."""
+    from src.video_download import download_video
 
-    In GUI mode the progress updates a single line in place (tqdm-style) via
-    _prog(prog_key, ...); in CLI mode it degrades to one append line per tick.
-    """
-    output_path.parent.mkdir(parents=True, exist_ok=True)
-    tmp_path = output_path.with_suffix(output_path.suffix + ".tmp")
-    start = time.time()
+    start = time.monotonic()
     last_print = start
-    downloaded = 0
-    # Refresh ~1/s in GUI (cheap, in-place) but stay sparse in CLI append mode.
     interval = 1.0 if _GUI_MODE else 5.0
 
-    resp = client.get_video_response(video_url)
-    try:
-        resp.raise_for_status()
-        if "text/html" in resp.headers.get("content-type", "").lower():
-            raise RuntimeError("下载返回登录页面，请重新登录。")
-        total = int(resp.headers.get("content-length", 0))
-    except Exception:
-        resp.close()
-        raise
+    def progress(downloaded, total, received):
+        nonlocal last_print
+        now = time.monotonic()
+        if now - last_print < interval:
+            return
+        elapsed = max(now - start, 1e-6)
+        avg_speed = received / elapsed  # Cached bytes are not network throughput.
+        events.progress("正在下载", phase="download", unit="bytes", completed=downloaded,
+                        total=total, speed=avg_speed)
+        if total > 0:
+            pct = downloaded * 100 / total
+            eta = max(total - downloaded, 0) / max(avg_speed, 1e-6)
+            msg = (
+                f"dl  {title} {tag} [{_bar(pct)}] {pct:5.1f}% · "
+                f"{_format_size(downloaded)}/{_format_size(total)} · "
+                f"{_format_size(avg_speed)}/s · ETA {_format_eta(eta)}"
+            )
+        else:
+            msg = (
+                f"dl  {title} {tag} [{_pulse(elapsed)}] {_format_size(downloaded)} · "
+                f"{_format_size(avg_speed)}/s · {_format_eta(elapsed)}"
+            )
+        if prog_key:
+            _prog(prog_key, msg)
+        else:
+            _tlog(msg)
+        last_print = now
 
-    try:
-        with tmp_path.open("wb") as f:
-            for chunk in resp.iter_content(chunk_size=chunk_size):
-                if not chunk:
-                    continue
-                f.write(chunk)
-                downloaded += len(chunk)
+    def message(text):
+        events.progress(text, phase="download")
+        _tlog(f"dl {title} {tag} · {text}")
 
-                now = time.time()
-                if now - last_print < interval:
-                    continue
-                elapsed = max(now - start, 1e-6)
-                avg_speed = downloaded / elapsed
-                events.progress("正在下载", phase="download", unit="bytes", completed=downloaded,
-                                total=total, speed=avg_speed)
-
-                if total > 0:
-                    pct = downloaded * 100 / total
-                    remaining = max(total - downloaded, 0)
-                    eta = remaining / max(avg_speed, 1e-6)
-                    msg = (
-                        f"dl  {title} {tag} "
-                        f"[{_bar(pct)}] {pct:5.1f}% · "
-                        f"{_format_size(downloaded)}/{_format_size(total)} · "
-                        f"{_format_size(avg_speed)}/s · "
-                        f"ETA {_format_eta(eta)}"
-                    )
-                else:
-                    # CDN gave no content-length → no %, show a spinner-ish bar
-                    # driven by elapsed so the user still sees motion.
-                    msg = (
-                        f"dl  {title} {tag} "
-                        f"[{_pulse(elapsed)}] {_format_size(downloaded)} · "
-                        f"{_format_size(avg_speed)}/s · {_format_eta(elapsed)}"
-                    )
-                if prog_key:
-                    _prog(prog_key, msg)
-                else:
-                    _tlog(msg)
-                last_print = now
-    except Exception:
-        if tmp_path.exists():
-            tmp_path.unlink()
-        raise
-    finally:
-        resp.close()
-
-    elapsed = max(time.time() - start, 1e-6)
-    avg_speed = downloaded / elapsed
-    if total > 0 and downloaded < total:
-        if tmp_path.exists():
-            tmp_path.unlink()
-        raise RuntimeError(
-            f"Incomplete download: {downloaded}/{total} bytes "
-            f"({downloaded / total:.1%})"
-        )
-
-    from src.media import probe
-    try:
-        events.progress("正在检查录像完整性", phase="download")
-        probe(tmp_path)
-        _begin_artifact(output_path)
-        os.replace(tmp_path, output_path)
-        artifact_metadata(output_path, kind="video")
-    finally:
-        tmp_path.unlink(missing_ok=True)
+    download_video(client, video_url, output_path, chunk_size=chunk_size,
+                   progress=progress, message=message, before_replace=_begin_artifact)
+    artifact_metadata(output_path, kind="video")
     return output_path
 
 
@@ -921,14 +874,20 @@ def _download_stage(in_q, out_q, client, sleep_sec, counters):
                         break
                     except ReplayNotAvailableError:
                         raise
-                    except Exception:
+                    except Exception as exc:
                         if attempt == 2:
                             raise
+                        from src.video_download import retained_bytes
+                        kept = retained_bytes(task["target_video_path"])
+                        suffix = f"；已保留 {_format_size(kept)}，将尝试续传" if kept else ""
+                        reason = events.redact(str(exc))[:240]
+                        retry_message = f"下载失败：{reason}{suffix}；等待重试"
+                        events.progress(retry_message, phase="retry", attempt=attempt + 1,
+                                        max_attempts=3, retry_seconds=2 ** attempt)
+                        _tlog(f"dl {_task_tag(task)} · {retry_message}")
                         if not client.check_alive():
                             from src.webvpn import WebVPNSession
                             client = ICourseClient(_login_with_retry(WebVPNSession, max_attempts=2))
-                        events.progress("下载失败，等待重试", phase="retry", attempt=attempt + 1,
-                                        max_attempts=3, retry_seconds=2 ** attempt)
                         time.sleep(2 ** attempt)
                 if video_path is None:
                     mark_stage(in_q, "pending", "回放尚未发布")
