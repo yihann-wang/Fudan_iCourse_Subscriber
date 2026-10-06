@@ -75,7 +75,7 @@ def check(config_store):
     configuration = load_config(Path(__file__).parent / "elearning_helper/config.json")
     course = configuration.courses[0]
     report["elearning"] = dict(tab=window.tabs.tabText(window.elearning_index), demo_ok=demo_ok,
-        settings_editor_available=window.elearning.edit_config.isEnabled(),
+        settings_editor_available=window.settings.isAncestorOf(window.settings.elearning_editor),
         course_count=len(configuration.courses), exclusive_limit=configuration.max_bytes,
         name_preservation_visible="同名保留" in demo_text,
         all_types_allowed=all(eligible({"display_name": name, "size": 1}, course, configuration) is None
@@ -86,9 +86,16 @@ def check(config_store):
         details_collapsed=not panel.details_toggle.isChecked(),
         settings_credentials_unused=not credential_calls,
         missing_credentials_inline=missing_credentials_inline)
+    report["workspaces"] = dict(
+        pages=[window.tabs.tabText(i) for i in range(window.tabs.count())],
+        all_fields_in_settings=all(window.settings.isAncestorOf(field) for field in window.fields.values()),
+        logs_collapsed=window.panel.log.isHidden(),
+        config_inputs_hidden=panel.config_path.isHidden() and panel.edit_config.isHidden())
     window.close()
     if (report["bundle_id"] != "local.fudan.icourse" or not report["isolated"]
             or report["modes"] != 2 or child["executable"] != sys.executable
+            or report["workspaces"]["pages"] != ["录像与笔记", "eLearning 与作业", "设置"]
+            or not all(report["workspaces"][key] for key in ["all_fields_in_settings", "logs_collapsed", "config_inputs_hidden"])
             or report["asr_providers"] != ["openai", "dashscope"]
             or not report["editable_asr_model"]
             or not all(report["video_repair"].values())

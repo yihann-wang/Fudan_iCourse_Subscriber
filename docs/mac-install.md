@@ -38,10 +38,10 @@ zsh "安装 Mac.command"
 
 ## 首次配置
 
-1. 在 App 的“设置”页填写所需配置：只使用 eLearning 或下载只需学校账号；新转录需要语音 API，生成笔记需要笔记 API。当前表单用于本次手动操作，按需点击“保存设置”持久保存。
-2. 点击“检查环境”；这一步不登录学校，也不调用笔记 API。
+1. 在 App 的“设置”页填写所需配置：只使用 eLearning 或下载只需学校账号；新转录需要语音 API，生成笔记需要笔记 API。点击“保存设置”后供新任务使用；两组功能的课程、路径也统一在此配置。
+2. 在「设置 → 高级与检查」点击“检查环境”；这一步不登录学校，也不调用笔记 API。
 3. 需要转录时点击“检查语音连接”：兼容模式读取模型列表，百炼模式检查上传凭证，不上传音频或提交识别。检查通过不保证所有参数和音频都可用，先用短文件确认。
-4. 录像操作在“任务”页选择保存目录、填写 iCourse 课程 ID，按需保存设置后手动开始；eLearning 在自己的页签点击刷新或同步，课程来自独立映射，详见 [eLearning](elearning.md)。首次访问受保护目录时，按系统提示点击 **Allow**。详细示例见[使用说明](usage.md)。
+4. 在「设置 → 录像与笔记」选任务方式、课程 ID 和保存目录并保存，再去「录像与笔记」开始；eLearning 课程和目录在「设置 → eLearning」，在「eLearning 与作业」点击刷新或同步，课程来自独立映射，详见 [eLearning](elearning.md)。首次访问受保护目录时，按系统提示点击 **Allow**。详细示例见[使用说明](usage.md)。
 
 已保存的目录会在下次打开时恢复。0.3.2 起 App 使用原生入口，普通退出、重开会保持同一个 App 身份；无需每次重新选择文件夹。系统拒绝过访问、重装或重建 App 后，可能需要重新授权，详见[磁盘访问问题](troubleshooting.md#外置磁盘或-documents-没有访问权限)。
 
@@ -67,7 +67,7 @@ zsh "安装 Mac.command"
 | 设置、密码和 API Key（明文） | `~/Library/Application Support/Fudan iCourse Subscriber/settings.json` |
 | 录像状态与锁 | `~/Library/Application Support/Fudan iCourse/pipeline.sqlite3`、`pipeline.lock` |
 | eLearning 索引与锁 | `~/Library/Application Support/Fudan iCourse/eLearning/index.sqlite3`、`run.lock` |
-| eLearning 个人课程与保存配置 | `~/Library/Application Support/Fudan iCourse Subscriber/elearning.json` |
+| eLearning 个人课程与保存配置 | 同一个 `settings.json` 的 `elearning` 字段；旧 `elearning.json` 仅作导入来源 |
 | eLearning 初始示例 | 安装 runtime 的 `site-packages/src/elearning_helper/config.json`；首次使用须在界面替换示例课程 |
 | App 启动日志 | `~/Library/Logs/Fudan iCourse Subscriber/application.log` |
 | 录像诊断与最近结果 | 同目录的 `tasks.log`、`last-run.txt`；eLearning 详情在页签内显示 |
@@ -105,7 +105,7 @@ git pull --ff-only
 zsh "安装 Mac.command"
 ```
 
-ZIP 用户下载最新版并解压，运行新目录中的安装器。升级会替换程序，保留本地设置和凭据文件、视频、转录、笔记及 eLearning 索引。安装版内的默认课程 JSON 属于程序文件，会随安装替换；个人映射在 eLearning 的“保存位置与课程设置…”中保存到独立的 `elearning.json`，更新后仍保留。不要只更新源码就继续使用旧 App；安装器运行成功后才完成桌面版更新。
+ZIP 用户下载最新版并解压，运行新目录中的安装器。升级会替换程序，保留本地设置和凭据文件、视频、转录、笔记及 eLearning 索引。安装版内的默认课程 JSON 属于程序文件，会随安装替换；个人映射在「设置 → eLearning」维护并统一保存到 `settings.json`，更新后仍保留。缺少统一配置时先读取旧 `elearning.json`，否则使用程序随附配置；旧文件和已有课件不删除、不搬移。不要只更新源码就继续使用旧 App；安装器运行成功后才完成桌面版更新。
 
 0.6.10 起密码和 API Key 直接保存在本地 `settings.json`。首次从旧版迁移时需要读取原钥匙串，系统可能要求授权；全部读取并保存成功后，后续启动与保存只使用文件。迁移失败不会覆盖旧配置，原钥匙串条目保留。Documents、外置磁盘等文件访问授权仍由 macOS 管理。
 
@@ -115,7 +115,7 @@ ZIP 用户下载最新版并解压，运行新目录中的安装器。升级会�
 
 重新打开主 App，确认 eLearning 页签显示“同名直接保留”，且没有同名比对复选框；点击前不会登录。开发者可按[开发文档](development.md)运行原生 `--self-test`，该自检使用默认设置与离线数据，不读取个人凭据。完整真实登录、目录授权及学校访问由用户手动验证。
 
-当前版本为 0.6.10，任务下拉框仅有“下载录像并生成笔记”和“只下载录像”。eLearning 提供“保存位置与课程设置…”，密码及 API Key 保存到本地配置文件。更新不创建后台服务、定时任务或邮件通知。
+当前版本为 0.7.1，主窗口为两个工作页和统一设置页。录像任务仍仅有“下载录像并生成笔记”和“只下载录像”，可与 eLearning 并行；课程、目录、账号及 API 参数统一保存到本地配置文件。更新不创建后台服务、定时任务或邮件通知。
 
 ## 卸载
 

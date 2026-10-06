@@ -48,11 +48,11 @@ def test_default_has_no_duplicate_login_inputs_or_automatic_operation(app):
 def test_main_window_exposes_tab_without_changing_video_settings(app):
     values = defaults()
     window = MainWindow(initial_values=values)
-    assert window.tabs.tabText(window.elearning_index) == "eLearning 文件与作业"
-    assert window.collect() == values
+    assert window.tabs.tabText(window.elearning_index) == "eLearning 与作业"
+    assert {k: v for k, v in window.collect().items() if k != "elearning"} == {k: v for k, v in values.items() if k != "elearning"}
     window.tabs.setCurrentIndex(window.elearning_index)
-    assert window.video_actions.isHidden()
-    assert window.progress_scroll.isHidden()
+    assert not window.video_actions.isVisible()
+    assert not window.progress_scroll.isVisible()
     window.tabs.setCurrentIndex(0)
     assert not window.video_actions.isHidden()
     window.close()
@@ -176,7 +176,7 @@ def test_unified_settings_adapter_does_not_reload_or_save_credentials(app, monke
     panel = window.elearning
     assert panel.prepare_credentials()
     assert json.loads(panel.pending_credentials) == {"student_id": "FIXTURE_STUDENT", "password": "FIXTURE_PASSWORD"}
-    assert window.collect() == values
+    assert {k: v for k, v in window.collect().items() if k != "elearning"} == {k: v for k, v in values.items() if k != "elearning"}
     panel.pending_credentials = None
     panel.settings_button.click()
     assert window.tabs.currentIndex() == window.settings_index
@@ -207,7 +207,7 @@ def test_manual_submission_stop_repeat_click_and_tab_switch_do_not_resubmit(app,
     from src.preferences import Preferences
     monkeypatch.setattr(Preferences, "load", lambda *_: pytest.fail("must not load real settings"))
     monkeypatch.setattr(Preferences, "save", lambda *_: pytest.fail("must not save credentials"))
-    window = MainWindow(initial_values=defaults())
+    window = MainWindow(initial_values={**defaults(), "stu_id": "FIXTURE_STUDENT", "uis_psw": "FIXTURE_PASSWORD"})
     panel = window.elearning
     calls = []
     provider = panel.credential_provider
@@ -240,7 +240,8 @@ def test_manual_submission_stop_repeat_click_and_tab_switch_do_not_resubmit(app,
         assert "FIXTURE_READY" in panel.output.toPlainText()
         assert calls == [True] and panel.pending_credentials is None
         assert not panel.refresh_button.isEnabled() and not panel.sync_button.isEnabled()
-        assert not window.tabs.isTabEnabled(window.settings_index)
+        assert window.tabs.isTabEnabled(window.settings_index)
+        assert window.start.isEnabled()
         panel.refresh_button.click()
         panel.sync_button.click()
         panel.launch("sync")

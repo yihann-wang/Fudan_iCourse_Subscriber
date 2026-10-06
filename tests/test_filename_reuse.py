@@ -252,7 +252,7 @@ def test_gui_manual_verification_requires_no_credentials_and_has_cancel(
         "--sub-ids",
         "123456",
     ]
-    assert "完整校验" in window.verify.text() and window.stop.text() == "停止任务"
+    assert "完整校验" in window.verify.text() and window.stop.text() == "停止录像任务"
     window.panel.begin("verify-test")
     from src.task_view_model import TaskViewModel
 

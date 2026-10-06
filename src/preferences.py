@@ -29,7 +29,7 @@ def defaults():
                 llm_name_1="LLM", llm_api_key_1="", llm_base_url_1="", llm_models_1="",
                 llm_output_tokens=DEFAULT_OUTPUT_TOKENS,
                 llm_timeout_minutes=DEFAULT_TIMEOUT_MINUTES,
-                overwrite=False, redo_notes=False, keep_awake=True)
+                overwrite=False, redo_notes=False, keep_awake=True, elearning=None)
 
 
 def as_bool(value):
@@ -105,7 +105,7 @@ class Preferences:
 
     def save(self, values):
         saved = {k: v for k, v in values.items() if k in defaults()}
-        saved.update(schema=2, credential_storage="file")
+        saved.update(schema=3, credential_storage="file")
         # One atomic file update keeps passwords and ordinary settings together.
         # No separate vault, encryption password or permission setup is used.
         atomic_write_json(self.path, saved)

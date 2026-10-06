@@ -10,7 +10,6 @@ from PySide6.QtCore import Qt, QTimer, QUrl
 from PySide6.QtGui import QDesktopServices
 from PySide6.QtWidgets import (
     QApplication,
-    QComboBox,
     QFileDialog,
     QHBoxLayout,
     QHeaderView,
@@ -26,6 +25,7 @@ from PySide6.QtWidgets import (
 )
 
 from .artifacts import atomic_write_text
+from .ui_style import ArrowComboBox, EmptyState
 from .task_events import redact
 from .task_view_model import (
     STAGE_NAMES,
@@ -60,19 +60,26 @@ class TaskPanel(QWidget):
         self.log_dir = Path(log_dir) if log_dir else None
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(12)
         self.status = QLabel("就绪 · 选择课程后开始任务")
-        self.status.setStyleSheet("font-weight:600; font-size:16px")
+        self.status.setProperty("role", "sectionTitle")
         self.status.setWordWrap(True)
-        heading = QHBoxLayout()
+        self.heading = QWidget()
+        heading = QHBoxLayout(self.heading)
+        heading.setContentsMargins(0, 0, 0, 0)
         heading.addWidget(self.status, 1)
         self.previous = QPushButton("上次运行结果")
         self.previous.clicked.connect(self.show_previous)
         self.previous.setEnabled(bool(self.log_dir and (self.log_dir / "last-run.txt").is_file()))
         heading.addWidget(self.previous)
-        layout.addLayout(heading)
+        layout.addWidget(self.heading)
         self.counts = QLabel("按课程查看各课次的下载、转录和笔记状态。")
+        self.counts.setProperty("role", "muted")
         self.counts.setWordWrap(True)
         layout.addWidget(self.counts)
+        self.empty = EmptyState("课程准备就绪", "开始任务后，在这里查看各课次的进度。")
+        self.empty.hide()
+        layout.addWidget(self.empty, 1)
         self.content = QWidget()
         layout.addWidget(self.content, 1)
         layout = QVBoxLayout(self.content)
@@ -80,6 +87,8 @@ class TaskPanel(QWidget):
         self.progress = QProgressBar()
         self.progress.setRange(0, 100)
         self.progress.setValue(0)
+        self.progress.setTextVisible(False)
+        self.progress.setFixedHeight(4)
         layout.addWidget(self.progress)
         self.tree = QTreeWidget()
         self.tree.setColumnCount(4)
@@ -87,7 +96,6 @@ class TaskPanel(QWidget):
         self.tree.setRootIsDecorated(True)
         self.tree.setAlternatingRowColors(True)
         self.tree.setUniformRowHeights(True)
-        self.tree.setStyleSheet("QTreeView::item { padding: 5px 4px; }")
         self.tree.setMinimumHeight(150)
         self.tree.header().setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
         for col in (1, 2, 3):
@@ -116,8 +124,10 @@ class TaskPanel(QWidget):
             actions.addWidget(button)
         actions.addStretch()
         layout.addLayout(actions)
-        log_controls = QHBoxLayout()
-        self.log_filter = QComboBox()
+        self.log_controls = QWidget()
+        log_controls = QHBoxLayout(self.log_controls)
+        log_controls.setContentsMargins(0, 0, 0, 0)
+        self.log_filter = ArrowComboBox()
         self.log_filter.addItems(["所有课次记录", "所选课次记录"])
         self.log_filter.currentIndexChanged.connect(self.filter_changed)
         log_controls.addWidget(self.log_filter)
@@ -125,7 +135,7 @@ class TaskPanel(QWidget):
         latest.clicked.connect(lambda: self.log.verticalScrollBar().setValue(self.log.verticalScrollBar().maximum()))
         log_controls.addWidget(latest)
         log_controls.addStretch()
-        layout.addLayout(log_controls)
+        layout.addWidget(self.log_controls)
         self.log = QPlainTextEdit()
         self.log.setReadOnly(True)
         self.log.setMaximumBlockCount(1000)
@@ -146,6 +156,13 @@ class TaskPanel(QWidget):
 
     def set_compact(self, compact):
         self.content.setVisible(not compact)
+        self.heading.setVisible(not compact)
+        self.counts.setVisible(not compact)
+        self.empty.setVisible(compact)
+
+    def set_logs_visible(self, visible):
+        self.log_controls.setVisible(visible)
+        self.log.setVisible(visible)
 
     def begin(self, run_id):
         self.set_compact(False)
