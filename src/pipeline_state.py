@@ -119,7 +119,12 @@ def artifact_metadata(path, *, source=None, settings_fingerprint=None, **metadat
     })
 
 
-def valid_artifact(path):
+def valid_artifact(path, *, source=None, check_source=True):
+    """Validate an artifact, optionally binding a transcript to a relocated video.
+
+    Completed user notes may be preserved independently of their old source path;
+    callers must explicitly opt out of source validation for that use case.
+    """
     path = Path(path)
     if not path.is_file() or path.stat().st_size == 0:
         return False
@@ -147,8 +152,8 @@ def valid_artifact(path):
         if metadata["sha256"] != cached_file_sha256(path) and not (
                 path.suffix == ".md" and metadata.get("status") == "complete"):
             return False
-        source = metadata.get("source")
-        if source and (not Path(source).is_file() or cached_file_sha256(source) != metadata["source_sha256"]):
+        source = source or metadata.get("source")
+        if check_source and source and (not Path(source).is_file() or cached_file_sha256(source) != metadata["source_sha256"]):
             return False
         # Completed transcripts, like notes, belong to the user. A backend
         # migration must not invalidate an entire semester of verified files.
@@ -157,7 +162,7 @@ def valid_artifact(path):
         if path.suffix == ".md":
             # Completed notes belong to the user. New LLM defaults only apply
             # to new work; explicit --overwrite requests regeneration.
-            if source and not valid_artifact(source):
+            if check_source and source and not valid_artifact(source):
                 return False
         return True
     except (ValueError, KeyError, OSError):

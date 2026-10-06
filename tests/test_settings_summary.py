@@ -20,9 +20,14 @@ class MemoryKeyring:
         return self.values.get((service, key))
 
 
-def test_secrets_never_written_to_preferences(tmp_path):
+def test_secrets_saved_in_single_local_file_without_keychain(tmp_path):
     path = tmp_path / "settings.json"
-    store = Preferences(path, MemoryKeyring())
+    class UnusedKeyring:
+        def get_password(self, *_):
+            pytest.fail("Local settings must not read Keychain")
+        def set_password(self, *_):
+            pytest.fail("Local settings must not write Keychain")
+    store = Preferences(path, UnusedKeyring())
     # Synthetic values exist only during this test; no real account is contacted.
     fake_password = uuid4().hex
     fake_api_key = uuid4().hex
@@ -31,20 +36,56 @@ def test_secrets_never_written_to_preferences(tmp_path):
                   asr_api_key=uuid4().hex, asr_dashscope_api_key=uuid4().hex)
     store.save(values)
     text = path.read_text()
-    assert all(values[field] not in text for field in SECRET_FIELDS)
-    assert all(field not in json.loads(text) for field in SECRET_FIELDS)
+    assert all(json.loads(text)[field] == values[field] for field in SECRET_FIELDS)
+    assert json.loads(text)["credential_storage"] == "file"
+    assert "secret_profile" not in json.loads(text)
     assert all(store.load()[field] == values[field] for field in SECRET_FIELDS)
-    assert path.stat().st_mode & 0o777 == 0o600
+    assert list(tmp_path.iterdir()) == [path]
 
 
-def test_keychain_failure_has_no_plaintext_fallback(tmp_path):
+def test_keychain_import_failure_preserves_old_file(tmp_path):
     class FailingKeyring(MemoryKeyring):
-        def set_password(self, *_):
+        def get_password(self, *_):
             raise RuntimeError("locked")
     path = tmp_path / "prefs.json"
+    path.write_text(json.dumps(dict(schema=1, secret_profile="old", course_ids="12345")))
+    previous = path.read_bytes()
     with pytest.raises(RuntimeError, match="locked"):
-        Preferences(path, FailingKeyring()).save(defaults())
-    assert not path.exists()
+        Preferences(path, FailingKeyring()).load()
+    assert path.read_bytes() == previous
+
+
+def test_keychain_import_happens_only_once_and_keeps_existing_items(tmp_path):
+    from src.preferences import SERVICE
+    vault = MemoryKeyring()
+    secrets = {field: uuid4().hex for field in SECRET_FIELDS}
+    for field, value in secrets.items():
+        vault.set_password(SERVICE, f"old:{field}", value)
+    before = dict(vault.values)
+    path = tmp_path / "settings.json"
+    path.write_text(json.dumps(dict(schema=1, secret_profile="old", course_ids="12345")))
+    store = Preferences(path, vault)
+    loaded = store.load()
+    assert all(loaded[field] == value for field, value in secrets.items())
+    assert loaded['course_ids'] == '12345' and vault.values == before
+    assert json.loads(path.read_text())['credential_storage'] == 'file'
+    vault.values.clear()
+    assert Preferences(path, vault).load() == loaded
+
+
+def test_failed_atomic_save_keeps_previous_settings_and_credentials(tmp_path, monkeypatch):
+    path = tmp_path / 'settings.json'
+    store = Preferences(path)
+    values = dict(defaults(), uis_psw=uuid4().hex)
+    store.save(values)
+    previous = path.read_bytes()
+    def fail(*args):
+        raise OSError('disk full')
+    monkeypatch.setattr('src.artifacts.os.replace', fail)
+    with pytest.raises(OSError, match='disk full'):
+        store.save(dict(values, uis_psw=uuid4().hex))
+    assert path.read_bytes() == previous
+    assert list(tmp_path.iterdir()) == [path]
 
 
 def test_legacy_windows_paths_and_false_string_migrate(tmp_path):
@@ -68,7 +109,7 @@ def test_gui_environment_is_isolated_and_explicit():
 
 @pytest.mark.parametrize("model", ["fun-asr", "Vendor/Custom-ASR-v7"])
 @pytest.mark.parametrize("path", ["/api/v1", "/api/v1/services/audio/asr/transcription"])
-def test_saved_legacy_aliyun_configuration_migrates_without_plaintext_keys(tmp_path, model, path):
+def test_saved_legacy_aliyun_configuration_migrates_in_local_file(tmp_path, model, path):
     vault = MemoryKeyring()
     store = Preferences(tmp_path / "settings.json", vault)
     original = {**defaults(), "asr_base_url": "https://dashscope.aliyuncs.com" + path,
@@ -91,7 +132,7 @@ def test_saved_legacy_aliyun_configuration_migrates_without_plaintext_keys(tmp_p
     restored = store.load()
     assert restored == loaded
     assert all(restored[k] == original[k] for k in ("uis_psw", "llm_api_key_1", "asr_api_key"))
-    assert all(original[k] not in store.path.read_text() for k in ("uis_psw", "llm_api_key_1", "asr_api_key"))
+    assert all(json.loads(store.path.read_text())[k] == original[k] for k in ("uis_psw", "llm_api_key_1", "asr_api_key"))
 
 
 @pytest.mark.parametrize("changes", [

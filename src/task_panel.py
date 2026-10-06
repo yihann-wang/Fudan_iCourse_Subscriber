@@ -262,8 +262,8 @@ class TaskPanel(QWidget):
             return
         self.status.setText(model.heading)
         c = model.counts()
-        ended = sum(c[s] for s in ("success", "failed", "pending", "cancelled", "interrupted"))
-        detail = f"本次已结束 {ended}/{model.total} 课 · 成功 {c['success']} · 处理中 {c['running']} · 排队 {c['queued']}"
+        ended = sum(c[s] for s in ("success", "skipped", "failed", "pending", "cancelled", "interrupted"))
+        detail = f"本次已结束 {ended}/{model.total} 课 · 成功 {c['success']} · 未校验跳过 {c['skipped']} · 处理中 {c['running']} · 排队 {c['queued']}"
         for key, label in (("failed", "失败"), ("pending", "等待回放"), ("cancelled", "停止"), ("interrupted", "中断")):
             if c[key]:
                 detail += f" · {label} {c[key]}"
@@ -285,7 +285,7 @@ class TaskPanel(QWidget):
                 self.groups[course_id] = item
             cc = model.counts(course_id)
             count = sum(cc.values())
-            suffix = f"成功 {cc['success']}/{count}"
+            suffix = f"成功 {cc['success']}/{count} · 未校验跳过 {cc['skipped']}"
             for key, label in (("running", "处理中"), ("failed", "失败"), ("pending", "待回放"), ("cancelled", "停止"), ("interrupted", "中断")):
                 if cc[key]:
                     suffix += f" · {label} {cc[key]}"
@@ -314,7 +314,7 @@ class TaskPanel(QWidget):
     def render_detail(self):
         task = self.selected_task()
         for name, button in (("dl", self.open_video), ("sm", self.open_note)):
-            button.setEnabled(bool(task and task.stages[name].status in {"done", "cached"} and task.paths.get(name)))
+            button.setEnabled(bool(task and task.stages[name].status in {"done", "cached", "unchecked"} and task.paths.get(name)))
         if not task:
             self.detail.setText("选择一节课查看详情。")
             return

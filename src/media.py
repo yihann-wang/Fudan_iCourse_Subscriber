@@ -93,9 +93,11 @@ def probe(path, *, headers=None, timeout=30, cancel=None):
     if headers:
         cmd += ["-headers", headers]
     cmd += ["-show_entries", "format=duration:stream=codec_type,duration", "-of", "json", str(path)]
-    code, out, _ = run_media(cmd, timeout=timeout, cancel=cancel)
+    code, out, err = run_media(cmd, timeout=timeout, cancel=cancel)
     if code:
-        raise RuntimeError("无法读取媒体信息；请检查文件或重新登录获取录像。")
+        from .task_events import redact
+        detail = redact(err.decode(errors="replace"))[:600].strip()
+        raise RuntimeError(f"无法读取媒体信息（ffprobe 退出码 {code}）：{detail or '未返回详细原因'}")
     info = json.loads(out)
     streams = info.get("streams", [])
     durations = [info.get("format", {}).get("duration")]

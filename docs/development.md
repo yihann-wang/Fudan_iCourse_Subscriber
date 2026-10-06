@@ -1,74 +1,127 @@
-# 开发与发布
+# 开发、测试与发布
 
-## 环境与测试
+本文对应 2026-10-06 源码，包版本为 `0.6.10`。用户操作见[使用说明](usage.md)，此前设计评价及风险见[架构评审](architecture.md)。
 
-标准开发环境：Apple Silicon、macOS 14+、uv、ffmpeg，Python 3.13。
+## 开发环境
+
+桌面基线：Apple Silicon、macOS 14+、Python 3.13、uv、ffmpeg/ffprobe、Command Line Tools。源码支持的 Python 范围见 `pyproject.toml`；其他平台的核心测试不能代替 Mac 桌面验收。
 
 ```sh
 uv sync --locked --extra mac --python 3.13 --managed-python
-.venv/bin/pytest -q
+QT_QPA_PLATFORM=offscreen PYTHONDONTWRITEBYTECODE=1 .venv/bin/python -m pytest tests -q
 .venv/bin/ruff check --select F src tools scripts main.py tests
+.venv/bin/python -m src.cli doctor
 ```
 
-测试使用模拟登录、模型回答和临时文件，覆盖整课一次调用、失败重试、截断响应、转录产物校验、身份冲突、并发锁、外置目录布局、钥匙串失败和安装器。不要在自动化测试里填真实凭据、运行完整课程任务或发送邮件。
+测试使用临时目录、虚构账号、模拟响应和回环 HTTP 服务器；运行环境需允许绑定 `127.0.0.1`。不得把真实密码、钥匙串读取、学校同步、付费模型调用或邮件发送混入自动化回归。GUI 测试显式传入默认或模拟设置。
 
-GitHub Actions 在 macOS 14、macOS 26 和 Linux 上检查锁定依赖、代码、测试和 wheel。Mac 任务还会安装到临时目录、验证隔离运行环境和无界面的 Qt 窗口创建；不会访问课程或真实语音服务。新增本地 HTTP 模拟服务验证上传格式、模型切换、重试、取消和恢复。
+## 模块与入口
 
-本地实机已完成真实回放的下载、转录和整课笔记生成验证。运行速度和识别效果随硬件、音质、网络和模型服务变化。本地 MLX/CPU/CUDA 语音后端已移除；其他平台未做本版实机回归。
-
-## 目录
-
-| 路径 | 职责 |
+| 模块 | 实际职责 |
 |---|---|
-| `src/mac_gui.py` | Qt 界面，启动同一 CLI 引擎 |
-| `src/task_events.py` | 有版本和顺序号的进度事件、凭据脱敏 |
-| `src/task_view_model.py`、`src/task_panel.py` | 课程 / 课次状态聚合、进度与诊断界面 |
-| `src/preferences.py` | 普通设置、钥匙串与任务环境 |
-| `src/cli.py`、`src/engine.py` | 命令入口、取消和保持唤醒 |
-| `src/pipeline.py`、`src/pipeline_state.py` | 下载 → 转录 → 笔记队列、SQLite 状态与锁 |
-| `src/icourse.py`、`src/webvpn.py` | 学校登录、课程目录与回放 |
-| `src/asr/`、`src/transcriber.py`、`src/media.py` | 兼容云端语音接口、可取消的网络进程、音频块缓存与可选字幕 |
-| `src/asr/dashscope.py` | 百炼录音协议：私有上传、异步任务恢复、句子/词时间戳；不限制模型 ID |
-| `src/summarizer.py` | 整课单次请求、重试与完整响应验证 |
-| `src/artifacts.py`、`src/summary_storage.py` | 校验、隐藏状态、原子写入与历史 |
-| `scripts/install_mac_runtime.py`、`scripts/create_mac_app.py` | 独立运行环境与本机启动器 |
-| `scripts/macos_launcher.m`、`src/mac_app_check.py` | 原生 App 入口与不读取真实设置的启动自检 |
-| `tests/` | 不使用真实账号的回归测试 |
-| `main.py`、数据库/邮件相关模块与 `tools/` | 保留的旧接口；新入口优先使用 `src.cli` |
+| `src/mac_gui.py`、`preferences.py` | 主窗口、表单、持久设置和子进程启动；不是下载服务 |
+| `src/cli.py`、`engine.py` | 命令分派；引擎管理结构化输出、心跳、唤醒与取消 |
+| `src/pipeline.py` | 回放规划、复用判定、下载/转录/笔记三个阶段的串接 |
+| `src/pipeline_state.py` | SQLite 阶段队列、失败/中断状态、产物有效性检查 |
+| `src/icourse.py`、`webvpn.py`、`fudan_idp.py` | iCourse 接口、WebVPN 路由与可复用的复旦 IDP 协议 |
+| `src/video_download.py` | 录像范围请求、可靠标识、断点与媒体完成检查 |
+| `src/video_storage.py` | 外置直写的刷盘、分段回读比较、小型系统盘接收摘要与存储异常 |
+| `src/transcriber.py`、`media.py` | 音频提取、分块、块缓存、时间轴及字幕 |
+| `src/asr/client.py`、`worker.py`、`cloud.py`、`dashscope.py` | 可取消网络子进程、兼容音频接口及百炼异步任务协议 |
+| `src/summarizer.py` | 完整原文一次笔记请求、有限重试、结果完整性与响应缓存 |
+| `src/artifacts.py`、`summary_storage.py` | 原子文件写入、哈希缓存、隐藏历史与正式笔记提交 |
+| `src/task_events.py`、`task_view_model.py`、`task_panel.py` | 版本化进度事件、按课程/课次聚合、诊断与最近结果 |
+| `src/elearning_panel.py` | eLearning 子进程、作业筛选、学校入口和同步计数 |
+| `src/elearning_settings.py` | 保存目录、课程映射的编辑、校验、导入与个人配置保存 |
+| `src/elearning_helper/config.py`、`api.py`、`auth.py` | 映射和边界验证、分页 GET、独立内存 CAS 会话 |
+| `src/elearning_helper/sync.py`、`state.py`、`__main__.py` | 文件策略、作业变化、SQLite 基线/提醒、运行锁与 CLI |
+| `scripts/install_mac_runtime.py`、`create_mac_app.py`、`macos_launcher.m` | wheel 检查、独立运行环境、原生 App 构建 |
+| `src/mac_app_check.py` | 默认设置下的原生启动自检与离线 eLearning 演示 |
+| `main.py`、`src/database.py`、`src/emailer.py` | 旧订阅/数据库/邮件入口，标准桌面操作不经过此链路 |
+| `tools/` | 兼容代码与辅助接口；仍有调用者，不能整目录当作无用代码删除 |
 
-每个阶段默认一个 worker，阶段之间可重叠工作。ASR 子进程只处理 HTTP 请求，方便取消正在上传或等待响应的请求。取消会终止任务进程组；课程流水线互斥，安装器也检查同一把锁。
+`icourse` 对应 `src.cli:main`，`icourse-mac` 对应 `src.mac_gui:main`。`启动 iCourse.command` 打开安装版。`启动 eLearning.command`、`python -m src.elearning_panel` 和 `python -m src.mac_gui --elearning` 仅为独立界面测试入口，没有主窗口的凭据提供器，不能作为正式登录入口。
 
-语音扩展以协议为界：`ASR_PROVIDER` 选择传输适配器，模型 ID 与 HTTPS 基础地址可配置。`DASHSCOPE_MODEL_SUGGESTIONS` 仅控制下拉示例，不用于校验或分支；`timestamp_alignment` 是显式能力选项，默认不发送，不按模型名推断。添加同协议的新模型不需要修改代码；新增协议或结果结构则应添加适配器与上传、取消、恢复、结果完整性测试。通用 URL 校验、凭据隔离与存储地址约束仍然保留。
+## 调用与进程边界
 
-桌面引擎使用 `ICOURSE_EVENTS=json` 和每次新建的 `ICOURSE_RUN_ID`。stdout 只传版本 1 的 JSON 行；普通输出重定向到 stderr，供诊断面板使用。事件中的 `seq` 由同一个锁按写入顺序递增，任务身份为 `(course_id, sub_id)`。下载和音频进度由同步工作线程的上下文带上身份，不依赖中文日志的措辞。GUI 忽略旧运行、重复事件和终态后的进度。
+```mermaid
+flowchart TD
+    A[原生 iCourse.app] --> B[MainWindow 与统一设置]
+    B --> C[QProcess: src.engine]
+    C --> D[src.cli / pipeline]
+    D --> E[录像下载 → 云端转录 → 整课笔记]
+    E --> F[CloudWorker / ASR worker]
+    C --> G[JSON 行事件 → TaskViewModel → TaskPanel]
+    B --> H[ElearningPanel]
+    H --> I[QProcess: elearning_helper]
+    I --> J[MemorySchoolSession / CanvasClient]
+    I --> K[run_sync / Store]
+    K --> L[课件文件 / 作业基线 / 本地提醒]
+```
 
-`--target COURSE:LECTURE` 可重复指定精确目标；`--resume-stage COURSE:LECTURE:dl|tr|sm` 仅作用于已指定目标。失败笔记重试跳过旧正式笔记，但复用有效转录和完整响应缓存；失败转录重试会复用该课次已成功的音频块。未找到显式目标会报错，不会误报成功。GUI 自己维护的最近一次摘要只是展示记录，不另建任务队列。
+录像每阶段一个工作线程，阶段之间可以重叠；网络 ASR 在独立子进程中执行。录像引擎创建受管进程组，停止先发送 SIGTERM，GUI 约 2.5 秒后清理仍存在的进程组。eLearning 停止向自己的单个 worker 发送 SIGINT，约 2 秒后强制结束仍在运行的进程。同一主窗口运行时禁用另一流程的操作；跨进程另有各自的锁。停止客户端不等于撤销已经提交的云端付费任务。
 
-离线测试还覆盖多课程同课次 ID、缓存运行的完整事件、十分钟进度不刷屏、失败重试、子进程停止、迟到事件、日志脱敏和滚动。Qt 测试使用默认配置和临时目录，不读取个人钥匙串。
+录像 stdout 使用版本 1 的 JSON 行，含 `run_id`、锁保护递增的 `seq` 及 `(course_id, sub_id)`；普通输出进 stderr。模型忽略旧运行、重复序号和结束后的进度。`--target COURSE:LECTURE` 可重复，`--resume-stage COURSE:LECTURE:dl|tr|sm` 只作用于显式目标。最近运行摘要仅供展示，不负责恢复队列。
 
-## 不应回归的行为
+eLearning stdout 目前是结束时的一份 JSON，stderr 是运行诊断；GUI 缓冲整份结果并调用 CLI 的 `display()` 生成详情。它尚未采用录像的事件模型，这是已知维护边界，见架构评审。
 
-- 不引入本地语音模型依赖。语音接口只能发送配置的地址和模型；密钥经进程管道传递，不写到参数或缓存。
-- 没有真实完整时间戳时只导出文字；旧 SRT 隐藏归档，不生成假字幕。
-- 正常笔记只发一次请求，携带完整转录；不要悄悄引入提纲、分章或审核调用。
-- 空响应、输出截断或非正常结束不能写成成功产物。
-- 单独重做笔记必须复用转录；缺少转录时明确失败。
-- 更新失败不能覆盖已完成的正式笔记；内部信息放入隐藏 `.icourse`。
-- GUI 保存的密码、API Key 不能进入 JSON，也不能在钥匙串失败时回退明文。
-- App 必须使用已安装的运行环境，不依赖源码目录或启动时的 Python 搜索路径。
+## 凭据与登录边界
 
-原生入口通过 `dlopen` 加载安装环境的 Python 动态库，在同一进程调用 `Py_BytesMain`，使用 `-I` 隔离 Python 搜索路径，并保留运行环境的 `sys.executable` 供后台引擎使用。不要将入口改回 shell 脚本或 `exec` 替换为解释器，否则会丢失原生主程序身份。GUI 和后台分别检查目录；没有启用 App Sandbox，也不修改 TCC 数据库。这里的本地 ad-hoc 签名只用于运行，不等于跨版本稳定的 Developer ID 身份。[Apple DTS 背景说明](https://developer.apple.com/forums/thread/678819)。
+| 路径 | 当前机制与限制 |
+|---|---|
+| 设置保存 | 普通设置与四项凭据写入同一个明文 `settings.json`，原子替换；正常读写不访问 Keychain，旧格式仅迁移时读取一次 |
+| GUI → 录像引擎 | `runtime_environment()` 将当前表单的 UIS/API 凭据放入子进程环境；不作为命令行参数 |
+| 引擎 → ASR worker | 请求与设置通过 stdin JSON；`Popen` 仍继承父进程环境，不能声称环境中绝无凭据 |
+| GUI → eLearning worker | 只提交当前学号和密码，通过私有 stdin（最多 8192 字节）；不额外放入 argv、环境、文件或日志 |
+| eLearning 认证 | 新建内存会话，独立完成 CAS 回调及用户 profile 校验；不读取浏览器 Cookie，也不额外读取 Keychain |
+| eLearning CLI 兼容模式 | 可读取配置指定的 Bearer 环境变量；GUI 使用账号密码管道，不要求创建 token |
 
-## 构建与安装检查
+共享 `fudan_idp.py` 只复用认证协议。iCourse 的 WebVPN 会话与 eLearning 会话分开，服务回调及成功校验各自保留。eLearning 下载到允许的存储主机时不携带学校 Cookie/认证头。验证码、二次认证及未知跳转停止，不自动解答挑战。主窗口从本地设置加载已保存的凭据；测试用模拟设置，真实凭据迁移与自动化回归分开执行。
+
+## 状态、缓存与一致性
+
+| 数据 | 所有者与恢复含义 |
+|---|---|
+| `settings.json` | GUI 配置与明文密码/API Key，不应作为诊断附件共享；不会因刷新 eLearning 自动保存 |
+| `elearning.json` | 个人课程映射、保存根目录与同步记录目录；不随运行环境重装覆盖 |
+| `Fudan iCourse/pipeline.sqlite3`、`pipeline.lock` | 录像阶段状态与单流水线锁；新运行依据产物重新规划，旧 queued/running 标记中断 |
+| 产物旁 `.icourse/` | 校验记录、录像续传、完整笔记响应和旧笔记历史；普通已完成笔记允许用户编辑 |
+| `Fudan iCourse Subscriber/asr-cache/` | 按来源与语音配置隔离的成功块、云端任务编号和恢复资料 |
+| `Fudan iCourse/eLearning/index.sqlite3`、`run.lock` | 文件来源/散列/路径，课程检查时间、作业基线、本地提醒与同步互斥 |
+| `tasks.log`、`last-run.txt` | 录像诊断及上次展示摘要，不是执行状态来源 |
+
+具体绝对位置见[安装指南](mac-install.md#文件安装在哪里)。不要混用旧 `main.py` 的数据库与当前两套索引。
+
+录像队列使用 WAL；eLearning 文件记录逐文件提交，作业每课完整读完分页才更新基线。同名保留在查询旧索引和计算 SHA 之前返回，不写新的已验证行，也不推进旧行的来源版本。新文件先原子发布，再提交 SQLite：两者不是一个事务；若在两步之间崩溃，下次按同名规则保留未索引文件，不虚构校验结果。
+
+当前两个 SQLite 核心没有统一的版本迁移机制，JSON 缓存各有自己的 schema。后续改结构必须新增迁移/兼容测试；不能用删除用户数据库替代迁移。正常取消清理本次临时文件，强杀可能留下 `.elearning-*.part`；它不会作为课件复用。
+
+## 关键行为约束与测试位置
+
+| 约束 | 主要回归测试 |
+|---|---|
+| 同名保留、零传输、不写假索引、并发出现同名文件 | `test_same_name_preservation.py`、`test_courseware_dedup.py` |
+| 所有类型、严格小于 50,000,000 字节、旧目录不查重 | `test_elearning_all_files.py`、`test_elearning.py` |
+| 短读从头最多三次、1/2 秒退避、认证与策略错误不重试 | `test_download_recovery.py`、`test_download_diagnostics.py` |
+| 作业分页完整、锁定项隐藏、解锁重现与基线不丢失 | `test_assignment_visibility.py`、`test_elearning_panel.py` |
+| CAS、跨域、模拟凭据、主窗口手动触发与不额外保存 | `test_elearning_auth.py`、`test_elearning_panel.py` |
+| 录像续传、媒体完整性、阶段恢复与课程身份 | `test_video_download.py`、`test_media_integrity.py`、`test_pipeline_roundtrip.py` |
+| 云端两种协议、取消、缓存、时间戳 | `test_cloud_asr.py`、`test_dashscope_asr.py`、`test_asr_media.py` |
+| 整课单次请求、截断拒绝、笔记历史与失败恢复 | `test_single_pass_summary.py`、`test_empty_summary_response.py`、`test_summary_storage.py` |
+| 事件乱序/旧运行、GUI、本地凭据原子保存与旧钥匙串迁移、安装边界 | `test_task_events.py`、`test_task_panel.py`、`test_settings_summary.py`、`test_mac_installer.py` |
+
+新语音模型只要使用现有协议与结果格式，可配置完整模型 ID；新协议应新增适配器及 HTTP 合约、取消、恢复测试。不要按模型名猜测时间戳能力或生成虚假字幕。录像大文件续传和 eLearning 小文件完整重试有不同保留语义，不应直接合并为同一下载实现。
+
+## 构建、安装与发布
 
 ```sh
 uv build --wheel --out-dir build/wheels
 .venv/bin/python -c 'from pathlib import Path; from scripts.install_mac_runtime import validate_wheel; [validate_wheel(p) for p in Path("build/wheels").glob("*.whl")]'
 ```
 
-wheel 仅允许 `src/`、`tools/` 中的 Python 文件和标准包元数据；安装器拒绝夹带配置、视频等文件。公开源码只包含代码、示例配置、文档和锁文件。
+wheel 白名单为 `src/`、`tools/` 的 Python 文件、规定的包元数据，以及唯一例外 `src/elearning_helper/config.json`。GitHub 副本使用通用课程示例；若本地修改了内置配置，公开同步前须替换个人路径和课程映射。白名单检查不等于已经检查了内容，仍需审计源码包，不能打包整个工作目录。
 
-测试安装器时使用临时目录，避免改动正在使用的 App：
+使用临时目录验证安装，仍需关闭正在使用相同源码构建产物的任务：
 
 ```sh
 validation_dir="$(mktemp -d)"
@@ -76,20 +129,58 @@ ICOURSE_STATE_DIR="$validation_dir/state" .venv/bin/python scripts/install_mac_r
   --support-dir "$validation_dir/support" --applications-dir "$validation_dir/Applications"
 "$validation_dir/support/runtime/bin/python" -I -m src.cli doctor
 QT_QPA_PLATFORM=offscreen "$validation_dir/Applications/iCourse.app/Contents/MacOS/iCourse" --self-test
-QT_QPA_PLATFORM=offscreen "$validation_dir/Applications/iCourse.app/Contents/MacOS/iCourse" --self-test
-codesign --verify --strict "$validation_dir/Applications/iCourse.app"
+codesign --verify --deep --strict "$validation_dir/Applications/iCourse.app"
 ```
 
-`--self-test` 只创建使用默认值的 Qt 窗口对象、检查后台 Python 和 App 身份，不读取个人设置、钥匙串或课程，不发起网络请求。它不能模拟用户在 Finder 启动后给予的真实 TCC 授权。验证授权保留时，应在干净的 macOS 用户环境中打开已安装 App，授权 Documents/外置卷，正常退出后再次打开，确认无需重新选目录；不要用 Terminal 的既有授权冒充 App 授权。
+验收结束后关闭该验证 App，清理本次创建的 `validation_dir`，避免遗留完整运行环境和可被 Spotlight 找到的旧入口。不要删除正式运行环境、共享 Python 或用户数据。安装目录及空间边界见[安装文档](mac-install.md#安装结构与空间管理)。
 
-普通用户更新仍运行根目录的安装器。`.app` 中含绝对运行环境路径，只供安装它的用户和电脑使用；发布时使用 Git 跟踪的源码，不发布本机 `.app`、虚拟环境或模型缓存。
+原生入口加载安装运行环境的 Python，使用 `-I` 隔离搜索路径，保留正确的 `sys.executable` 供子进程使用。自检使用空白默认设置，实际建立 Qt 主窗口并跑离线 eLearning 演示，不读取用户设置或 Keychain，也不登录。它不能证明 Finder 启动后的真实 TCC 授权和线上服务可用。
 
-## 发布检查
+安装器先构建、审计 wheel 和编译启动器，再原地更新 runtime；CLI 入口只持有 `pipeline.lock`，没有覆盖原生 App 是否仍打开或 eLearning 的 `run.lock`。因此正式更新必须人工结束两类任务并退出 App。本次安装另行检查了 App 进程和两类锁，但该保护尚未内建于仓库安装器。不可把它描述为现有安装器的全局互斥保证。
 
-1. 检查 `git status` 与暂存差异；不得加入 `.env`、个人 JSON、数据库、日志、课程、旧本机测试产物或字体二进制。
-2. 在干净目录运行上述测试与构建；确认 CI 通过。
-3. 更新 `pyproject.toml` 版本、`uv.lock`、`CHANGELOG.md` 和使用文档。
-4. 创建提交和版本标签。GitHub 的 **Source code (zip)** 即可作为分发源码包；源码包必须重新检查内容。
-5. 新用户从空配置启动，输入自己的凭据，不附带开发者配置。
+发布流程：
 
-本分支不是上游 V2 的替换升级安装器。需要 V2 云端功能时请使用对应版本，不能混用其数据库和工作流。详情见 [NOTICE](../NOTICE.md)。
+1. 审核改动和测试；在 Git 工作副本中先获取远端状态并确认目标分支。没有 `.git` 的开发副本只按源码白名单同步到受版本控制的副本，再检查差异；不得把缓存和个人文件整目录复制过去。
+2. 在干净环境跑回归、F 类 lint、wheel 审计、临时安装、自检和签名检查。
+3. 同步 `pyproject.toml`、`uv.lock`、CHANGELOG；当前版本为 0.6.10，提交 SHA 用于追踪这次源码快照。
+4. 检查 sdist/源码 ZIP，排除凭据、个人设置、日志、数据库、课程和虚拟环境；处理默认课程配置中的个人路径。
+5. 在最低支持 Mac 上手工验证启动、目录授权、保存/恢复及用户主动的小范围真实任务。按授权推送目标分支；推送源码不等于创建版本标签、GitHub Release 或分发便携 App。
+
+CI 配置矩阵为 macOS 14、macOS 26、Ubuntu 24.04，执行核心测试、lint、wheel 审计及 Mac 临时安装。桌面检查按两种任务模式验收。工作流无定时订阅；远端结果以相应提交的 GitHub Actions 状态为准，本机测试通过不能替代远端结果。
+
+## 历史验证：2026-10-04
+
+2026-10-04，同名保留修订新增专门测试并更新相关回归；最终完整测试 **480 passed in 39.60s**。此前同修订针对性测试 169 项通过。最终 F 类静态检查通过；移除了四个 eLearning 测试文件中九个未使用导入，再次完整回归通过。源码、测试与用于完整回归的工作副本按文件散列核对一致；安装版四个相关模块与源码匹配，原生 App 离线自检及签名验证通过。
+
+本次未读取真实密码、Keychain、浏览器 Cookie，未登录学校或调用付费接口。用户此前的真实学校登录、多类型同步和 Azure 文件恢复属于独立的用户实机反馈；它们不证明本次所有新分支均在线上验收。架构建议也未伪装成已实施功能。
+
+## 2026-10-05：录像快速规划
+
+新增 `src/video_checks.py`：在线常规规划的复用判定只读取有界 sidecar、文件 stat、既有下载失败记录；不调用 hash、ffprobe 或 MP4 扫描。按课程目录与完整课次 ID 限定候选，排除隐藏断点、符号链接、零大小文件和歧义。在线规划不再迁移旧录像/笔记文件。`unchecked` 是终态，对应 `skipped`，与成功分开计数；正常旧视频不自动进入付费阶段。
+
+手动 `verify-videos` 不经过学校登录或 ASR/LLM 设置，持有同一个 `pipeline.lock`，全量 SHA-256（不命中旧哈希缓存）+媒体 probe，逐字节进度节流到每250ms；取消沿用 engine 进程组取消。验证结果保存在 `ICOURSE_STATE_DIR/video-checks/<path-hash>.json`，默认系统盘 Application Support/Fudan iCourse。失败一直保留，直到针对同一路径的完整验证或经既有完整性验证的新下载成功。验证取消不写成功/失败。通过记录仅在文件签名未变且没有更新的异常标记时有效；原 sidecar 保留。
+
+`tests/test_filename_reuse.py` 覆盖无内容读取、课程/课次身份、空文件、符号链接、异常 sidecar/历史失败、部分下载保留、重复运行、无付费调用、真实 ffprobe、手动进度和取消。流水线 roundtrip 更新了旧文件“未校验跳过”的 UI 语义。明确本地生成/重做模式继续使用原来的严格来源验证；新下载媒体检查保持不变。没有实现卷 UUID 缓存重构、提高下载并发或更改 eLearning。
+
+
+## 2026-10-06：两种桌面任务与 eLearning 配置
+
+桌面仅保留 `download_and_summarize` 和 `download`，旧 `overwrite` / `redo_notes` 设置在收集表单时清除；高级 CLI 模式继续兼容。完整模式按缺项处理，已下载录像不再直接跳过整课。现有笔记通过本身的完成/散列规则保留，不因旧来源路径失效重做；需要复用转录时用当前录像的内容摘要核对来源。缺录像但已有笔记时仅下载，缺录像但已有转录时下载后验证转录来源再决定是否调用 ASR。已知录像异常继续在付费阶段前阻止。
+
+`elearning_settings.py` 提供配置编辑窗口；`config.parse_config()` 在写入前校验内存数据，原子保存到安装目录之外的个人配置。不读写凭据，不自动登录或同步。导入时将相对状态目录正规化为原配置对应的绝对位置，避免导入后悄悄改用空白索引。运行中禁用配置修改。
+
+新增回归覆盖两种任务与录像/转录/笔记存在性的组合、迁移后的来源摘要匹配、旧重做标志清除、eLearning 保存恢复、导入、取消和错误配置不覆盖。测试使用模拟学校与模型服务，不调用真实收费接口。
+
+本修订完整离线回归：**562 passed in 40.25s**；F 类静态检查通过，新增界面已离线渲染检查。构建 wheel 已白名单审计；正式本机更新前检查 App/后台进程并同时持有录像与 eLearning 任务锁，保存原安装备份。学校及收费服务未在本次修改中调用。
+
+## 2026-10-06：本地凭据与空间整理
+
+0.6.10 将普通设置和四项凭据写入同一个 `settings.json`，不增加权限选项、加密密码或单独的密钥文件。旧版 Keychain profile 仅用于一次迁移：读取成功后原子保存文件；后续启动、保存不再访问 Keychain，原条目保留。原子替换失败时旧文件仍可读取。凭据文件不进入 Git、wheel、源码包或公开诊断。
+
+完整离线回归 **564 passed in 40.55s**，覆盖文件保存/恢复、不访问钥匙串、旧数据迁移、迁移失败与写入失败。F 类检查、wheel 审计、正式 App 自检及签名验证通过。真实凭据迁移在本机单独完成，没有把值写入日志或调用学校、付费服务。
+
+按用户要求清理开发机的三套旧环境、十个旧启动器和已不再需要的中转目录。清理目标目录统计合计约 12.66 GB，前后观测系统可用空间增加约 7.52 GB；共享数据块、快照和同时运行的任务会影响差值，不能将目录大小相加当作必然释放量。正式 App、当前开发环境、课程目录及配置保留，正在运行的课程任务未中断，清理后正式 App 自检和签名检查通过。此为一次本机维护记录，不是安装器的自动清理行为。
+
+## 2026-10-06：GitHub 源码同步验证
+
+公开副本使用通用 eLearning 课程示例，测试通过独立模拟映射验证课程目录关系，不依赖开发者课表。该副本完整离线回归 **564 passed in 40.18s**，F 类静态检查、文档相对链接、待提交内容与本机凭据比对检查通过。源码包已检查排除个人配置和生成文件，wheel 已通过白名单审计；独立临时安装确认 0.6.10、两种任务模式和示例配置均可加载，原生自检与签名检查通过。临时 App、运行环境及构建副本在验收后清理，未改动正在使用的正式安装。

@@ -80,7 +80,7 @@ def test_all_stages_same_title_and_cached_rerun(monkeypatch, tmp_path, capsys):
     assert len(list((tmp_path / "videos").rglob("*.mp4"))) == 2
     assert len(list((tmp_path / "videos").rglob("*.srt"))) == 2
     assert len(list((tmp_path / "notes").rglob("*.md"))) == 2
-    assert all(p.parent.name == ".icourse" for p in tmp_path.rglob("*.json"))
+    assert all(p.parent.name in {".icourse", "video-checks"} for p in tmp_path.rglob("*.json"))
     monkeypatch.setenv("LLM_MAX_OUTPUT_TOKENS", "16384")
     monkeypatch.setenv("LLM_INPUT_CHAR_LIMIT", "4000")
     assert main() == 0
@@ -89,7 +89,7 @@ def test_all_stages_same_title_and_cached_rerun(monkeypatch, tmp_path, capsys):
     for event in cached_events:
         cached_model.apply(event)
     cached_model.finish(0)
-    assert cached_model.counts()["success"] == 2 and cached_model.total == 2
+    assert cached_model.counts()["success"] == 2 and cached_model.counts()["skipped"] == 0 and cached_model.total == 2
     assert not any(e["kind"] == "stage" for e in cached_events)
     assert calls == {"download": 2, "asr": 2, "summary": 2}
     connection = sqlite3.connect(tmp_path / "state" / "pipeline.sqlite3")

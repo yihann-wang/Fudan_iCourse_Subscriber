@@ -83,6 +83,21 @@ def test_wheel_accepts_source_and_standard_metadata(tmp_path):
     validate_wheel(wheel)
 
 
+def test_wheel_allows_only_the_public_elearning_configuration(tmp_path):
+    source = Path(__file__).parents[1] / "src/elearning_helper/config.json"
+    data = json.loads(source.read_text())
+    wheel = tmp_path / "config.whl"
+    for modified, accepted in [(data, True), ({**data, "password": "not-a-real-secret"}, False),
+                               ({**data, "courses": [{"id": "1", "password": "fixture"}]}, False)]:
+        with zipfile.ZipFile(wheel, "w") as archive:
+            archive.writestr("src/elearning_helper/config.json", json.dumps(modified))
+        if accepted:
+            validate_wheel(wheel)
+        else:
+            with pytest.raises(RuntimeError, match="公开配置结构"):
+                validate_wheel(wheel)
+
+
 def test_failed_build_leaves_existing_runtime_untouched(tmp_path, monkeypatch):
     runtime = tmp_path / "support" / "runtime"
     runtime.mkdir(parents=True)

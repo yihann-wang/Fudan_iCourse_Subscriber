@@ -98,7 +98,7 @@ def test_log_rotation_retention_and_previous_result(app, tmp_path):
 
 def test_failed_retry_keeps_exact_pairs_and_reuses_upstream(app, monkeypatch, tmp_path):
     values = defaults()
-    values.update(mode="summarize", course_ids="101,102", out_dir=str(tmp_path / "videos"),
+    values.update(mode="download_and_summarize", stu_id="test", uis_psw="test", course_ids="101,102", out_dir=str(tmp_path / "videos"),
                   summary_dir=str(tmp_path / "notes"), llm_models_1="test", llm_api_key_1=uuid4().hex,
                   llm_base_url_1="https://example.invalid", overwrite=True)
     window = MainWindow(initial_values=values)

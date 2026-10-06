@@ -1,0 +1,18 @@
+{
+  "base_url": "https://elearning.fudan.edu.cn",
+  "root": "~/Documents/Study/courses",
+  "state_dir": "~/Library/Application Support/Fudan iCourse/eLearning",
+  "max_bytes": 50000000,
+  "auth_env": "FUDAN_ELEARNING_TOKEN",
+  "timezone": "Asia/Shanghai",
+  "download_hosts": [
+    "canvas-production.s3.fudan.edu.cn"
+  ],
+  "courses": [
+    {
+      "id": "12345",
+      "name": "示例课程（请替换）",
+      "directory": "12345-示例课程/课件"
+    }
+  ]
+}

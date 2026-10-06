@@ -26,7 +26,7 @@ brew install uv ffmpeg
 zsh "安装 Mac.command"
 ```
 
-等待出现“安装完成”。失败时按提示修复后重新执行同一命令即可。安装器使用 `uv.lock` 锁定依赖，并在更新运行环境之前构建和检查程序包。请先结束课程任务并关闭旧 App；已有流水线运行时安装器会拒绝更新。
+等待出现“安装完成”。失败时按提示修复后重新执行同一命令即可。安装器使用 `uv.lock` 锁定依赖，并在更新运行环境之前构建和检查程序包。请先结束录像与 eLearning 两类任务并完全退出旧 App。安装器会检查录像流水线锁，但尚未内建 eLearning 锁或空闲 App 进程检查；不要将没有报锁冲突当作可以边运行边更新。
 
 安装结束后，在 **Finder → Go → Go to Folder…**（**Command+Shift+G**）输入：
 
@@ -38,10 +38,10 @@ zsh "安装 Mac.command"
 
 ## 首次配置
 
-1. 在 App 的“设置”页输入自己的 UIS 账号、语音 API 和笔记 API 配置，点击“保存设置”。
+1. 在 App 的“设置”页填写所需配置：只使用 eLearning 或下载只需学校账号；新转录需要语音 API，生成笔记需要笔记 API。当前表单用于本次手动操作，按需点击“保存设置”持久保存。
 2. 点击“检查环境”；这一步不登录学校，也不调用笔记 API。
-3. 点击“检查语音连接”：读取服务商模型列表，不上传音频。列表包含模型不保证每种参数都可用，先转录一个短文件确认。
-4. 在“任务”页选择保存目录，然后到“设置”页点击“保存设置”；填写课程 ID，开始任务。首次访问受保护目录时，按系统提示点击 **Allow**。详细示例见[使用说明](usage.md)。
+3. 需要转录时点击“检查语音连接”：兼容模式读取模型列表，百炼模式检查上传凭证，不上传音频或提交识别。检查通过不保证所有参数和音频都可用，先用短文件确认。
+4. 录像操作在“任务”页选择保存目录、填写 iCourse 课程 ID，按需保存设置后手动开始；eLearning 在自己的页签点击刷新或同步，课程来自独立映射，详见 [eLearning](elearning.md)。首次访问受保护目录时，按系统提示点击 **Allow**。详细示例见[使用说明](usage.md)。
 
 已保存的目录会在下次打开时恢复。0.3.2 起 App 使用原生入口，普通退出、重开会保持同一个 App 身份；无需每次重新选择文件夹。系统拒绝过访问、重装或重建 App 后，可能需要重新授权，详见[磁盘访问问题](troubleshooting.md#外置磁盘或-documents-没有访问权限)。
 
@@ -64,10 +64,13 @@ zsh "安装 Mac.command"
 |---|---|
 | App 启动器 | `~/Applications/iCourse.app` |
 | 独立 Python 运行环境 | `~/Library/Application Support/Fudan iCourse Subscriber/runtime` |
-| 普通设置 | `~/Library/Application Support/Fudan iCourse Subscriber/settings.json` |
-| 密码、API Key | macOS Keychain |
-| 任务状态 | `~/Library/Application Support/Fudan iCourse/` |
-| App 启动与运行日志 | `~/Library/Logs/Fudan iCourse Subscriber/application.log` |
+| 设置、密码和 API Key（明文） | `~/Library/Application Support/Fudan iCourse Subscriber/settings.json` |
+| 录像状态与锁 | `~/Library/Application Support/Fudan iCourse/pipeline.sqlite3`、`pipeline.lock` |
+| eLearning 索引与锁 | `~/Library/Application Support/Fudan iCourse/eLearning/index.sqlite3`、`run.lock` |
+| eLearning 个人课程与保存配置 | `~/Library/Application Support/Fudan iCourse Subscriber/elearning.json` |
+| eLearning 初始示例 | 安装 runtime 的 `site-packages/src/elearning_helper/config.json`；首次使用须在界面替换示例课程 |
+| App 启动日志 | `~/Library/Logs/Fudan iCourse Subscriber/application.log` |
+| 录像诊断与最近结果 | 同目录的 `tasks.log`、`last-run.txt`；eLearning 详情在页签内显示 |
 | uv 管理的 Python | 通常为 `~/.local/share/uv/python/` |
 | 转录块缓存 | `~/Library/Application Support/Fudan iCourse Subscriber/asr-cache/` |
 | 大文件校验缓存 | `~/Library/Caches/Fudan iCourse Subscriber/file-hashes/` |
@@ -75,6 +78,23 @@ zsh "安装 Mac.command"
 `~` 代表自己的用户文件夹。以上隐藏路径可通过 Finder 的 **Go to Folder…** 打开。
 
 安装完成后可以移动源码文件夹；已安装 App 使用独立的非 editable 程序包。不要删除它依赖的 uv Python 或运行环境。源码目录里的 `dist/iCourse.app` 只是本机启动器，包含本机运行环境路径，**不能直接拷给另一台 Mac 使用**。
+
+## 安装结构与空间管理
+
+安装脚本先用锁定依赖准备源码目录的 `.venv`，供构建和环境检查使用；再把程序及依赖安装到 Application Support 的 `runtime`；最后编译一个原生启动器，分别放进源码的 `dist` 和 `~/Applications`。更新复用同一个正式 `runtime`，不会每次新建一个带版本号的运行环境。
+
+| 目录或文件 | 日常用途与清理边界 |
+|---|---|
+| `~/Applications/iCourse.app` | 正式入口，应保留；本机测得约 86 KB |
+| Application Support 中的 `runtime` | 正式程序及依赖，应保留；本机测得约 1.32 GB |
+| 源码 `.venv` | 安装、开发和测试环境；本机约 1.35 GB，删除后下次安装或开发需重建 |
+| 源码 `dist/iCourse.app` | 与正式 App 指向同一运行环境的构建副本，可移除；再次构建会生成 |
+| 旧发布或临时验证目录的环境与 App | 确认不再使用、没有运行中的任务后可清理；不要连同唯一的源码仓库一起删除 |
+| 课程、笔记、个人配置、索引与 ASR 缓存 | 用户资料或恢复状态，应与程序清理分开处理 |
+
+Spotlight 会列出磁盘上的多个 `.app`，旧测试启动器还可能指向旧环境。日常使用 Applications 中的正式入口。删除旧 App 后搜索结果可能稍后才刷新。
+
+临时验证应使用独立目录，完成自检后清理该次生成的 App、运行环境和演示状态。磁盘故障处理中人工建立的中转目录可能含唯一备份及未完成录像，只有在核对保留内容并明确不再需要后才能删除。安装器不会自动删除这些资料。上表为一台 Mac 的测量值，依赖版本、共享数据块和文件系统快照会影响实际占用及可释放空间。
 
 ## 更新
 
@@ -85,11 +105,17 @@ git pull --ff-only
 zsh "安装 Mac.command"
 ```
 
-ZIP 用户下载最新版并解压，运行新目录中的安装器。升级会替换程序，保留设置、钥匙串凭据、视频、转录和笔记。不要只更新源码就继续使用旧 App；安装器运行成功后才完成桌面版更新。
+ZIP 用户下载最新版并解压，运行新目录中的安装器。升级会替换程序，保留本地设置和凭据文件、视频、转录、笔记及 eLearning 索引。安装版内的默认课程 JSON 属于程序文件，会随安装替换；个人映射在 eLearning 的“保存位置与课程设置…”中保存到独立的 `elearning.json`，更新后仍保留。不要只更新源码就继续使用旧 App；安装器运行成功后才完成桌面版更新。
 
-从旧脚本启动器升级到 0.3.2 后，macOS 可能重新询问文件访问或钥匙串访问。确认是自己刚安装的 iCourse 后授权一次。安装器使用本地 ad-hoc 签名，尚无 Developer ID 签名和公证，不能保证跨重装或跨版本永久保留系统授权。
+0.6.10 起密码和 API Key 直接保存在本地 `settings.json`。首次从旧版迁移时需要读取原钥匙串，系统可能要求授权；全部读取并保存成功后，后续启动与保存只使用文件。迁移失败不会覆盖旧配置，原钥匙串条目保留。Documents、外置磁盘等文件访问授权仍由 macOS 管理。
 
 原来已安装的 0.2 版本可以按同样方式更新。旧运行环境若依赖已删除的 Homebrew Python，可重新运行安装器修复；重装前不要删除课程或笔记目录。
+
+## 更新后检查
+
+重新打开主 App，确认 eLearning 页签显示“同名直接保留”，且没有同名比对复选框；点击前不会登录。开发者可按[开发文档](development.md)运行原生 `--self-test`，该自检使用默认设置与离线数据，不读取个人凭据。完整真实登录、目录授权及学校访问由用户手动验证。
+
+当前版本为 0.6.10，任务下拉框仅有“下载录像并生成笔记”和“只下载录像”。eLearning 提供“保存位置与课程设置…”，密码及 API Key 保存到本地配置文件。更新不创建后台服务、定时任务或邮件通知。
 
 ## 卸载
 

@@ -6,9 +6,9 @@ from dataclasses import dataclass, field
 
 STAGES = ("dl", "tr", "sm")
 STAGE_NAMES = dict(dl="下载", tr="云端转录", sm="笔记")
-TERMINAL = {"done", "cached", "na", "pending", "failed", "cancelled", "interrupted"}
+TERMINAL = {"unchecked", "done", "cached", "na", "pending", "failed", "cancelled", "interrupted"}
 LABELS = dict(queued="排队中", waiting="等待前序阶段", running="处理中", done="已完成",
-              cached="使用已有", na="不适用", pending="等待回放", failed="失败",
+              unchecked="已有，未校验／跳过", cached="使用已有", na="不适用", pending="等待回放", failed="失败",
               cancelled="已停止", interrupted="已中断")
 
 
@@ -51,6 +51,8 @@ class Lecture:
         for status in ("failed", "pending", "interrupted", "cancelled"):
             if status in values:
                 return status
+        if "unchecked" in values and all(s in {"done", "cached", "na", "unchecked"} for s in values):
+            return "skipped"
         if all(s in {"done", "cached", "na"} for s in values):
             return "success"
         return "running" if "running" in values else "queued"
@@ -128,6 +130,8 @@ class TaskViewModel:
                 self.tasks[key] = task
                 self.courses[key[0]] = task.course_title
                 self.total = max(self.total, len(self.tasks))
+                if task.outcome == "skipped":
+                    self.record(event, f"{task.course_title} · {task.title}：已有，未校验／跳过（未调用云服务）")
                 if task.outcome == "success":
                     self.record(event, f"{task.course_title} · {task.title}：复用已有结果")
                 return True
@@ -136,7 +140,7 @@ class TaskViewModel:
             if task is None or name not in STAGES:
                 return False
             stage = task.stages[name]
-            if task.outcome in {"failed", "pending", "cancelled", "interrupted", "success"} or stage.status in TERMINAL:
+            if task.outcome in {"failed", "pending", "cancelled", "interrupted", "success", "skipped"} or stage.status in TERMINAL:
                 return False
             if kind == "stage":
                 status = event.get("status")
@@ -179,7 +183,7 @@ class TaskViewModel:
         return True
 
     def counts(self, course_id=None):
-        counts = {s: 0 for s in ("success", "running", "queued", "failed", "pending", "cancelled", "interrupted")}
+        counts = {s: 0 for s in ("success", "skipped", "running", "queued", "failed", "pending", "cancelled", "interrupted")}
         for task in self.tasks.values():
             if course_id is None or task.course_id == course_id:
                 counts[task.outcome] += 1
@@ -222,6 +226,8 @@ class TaskViewModel:
             return "本次任务已结束，部分课次需要处理" if c["success"] else "任务未完成，请查看原因"
         if c["pending"]:
             return "本次检查已结束，部分课次尚无回放"
+        if c["skipped"]:
+            return "本次任务已结束；已有文件已跳过，未校验"
         return "所有课次均已完成" if self.total else "没有符合条件的课次" if self.planned else "操作完成"
 
 

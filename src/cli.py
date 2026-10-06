@@ -63,6 +63,12 @@ def _settings(args):
 
 def main(argv=None):
     argv = list(sys.argv[1:] if argv is None else argv)
+    if argv and argv[0] == "verify-videos":
+        from .video_checks import main as verify
+        return verify(argv[1:])
+    if argv and argv[0] == "elearning":
+        from .elearning_helper.__main__ import main as elearning
+        return elearning(argv[1:])
     if argv and argv[0] == "run":
         from .pipeline import main as run
         saved = sys.argv
@@ -73,9 +79,11 @@ def main(argv=None):
             sys.argv = saved
     parser = argparse.ArgumentParser(description="iCourse：课程下载与云端转录")
     commands = parser.add_subparsers(dest="command", required=True)
+    commands.add_parser("verify-videos", help="手动完整校验本地录像（不下载、不调用云服务）")
     commands.add_parser("doctor", help="检查运行环境（不登录、不调用云模型）")
     commands.add_parser("gui", help="打开 Mac 界面")
     commands.add_parser("run", help="运行课程流水线；run --help 查看参数")
+    commands.add_parser("elearning", help="课件增量下载、新作业与截止变更；elearning --help 查看参数")
     for name in ("check-asr", "transcribe"):
         command = commands.add_parser(name)
         command.add_argument("--base-url")

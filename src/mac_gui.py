@@ -38,6 +38,7 @@ from .storage_access import StorageAccessError, check_directory, check_pipeline_
 from .summary_settings import DEFAULT_OUTPUT_TOKENS, DEFAULT_TIMEOUT_MINUTES
 from .task_events import redact, set_secrets
 from .task_panel import TaskPanel
+from .elearning_panel import ElearningPanel
 
 ROOT = Path(__file__).resolve().parent.parent
 
@@ -53,7 +54,7 @@ class ScrollSafeComboBox(QComboBox):
 
 
 class MainWindow(QMainWindow):
-    def __init__(self, preferences=None, initial_values=None):
+    def __init__(self, preferences=None, initial_values=None, elearning_config_store=None):
         super().__init__()
         self.preferences = preferences or Preferences()
         self.values = initial_values if initial_values is not None else self.preferences.load(ROOT / ".icourse_gui_config.json")
@@ -103,28 +104,28 @@ class MainWindow(QMainWindow):
         form.setFormAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignTop)
         form.setVerticalSpacing(12)
         self.mode = ScrollSafeComboBox()
-        for label, value in [("下载并生成笔记", "download_and_summarize"), ("只下载课程", "download"),
-                             ("为本地课程生成笔记", "summarize"), ("转录一个本地文件", "local_asr")]:
+        for label, value in [("下载录像并生成笔记", "download_and_summarize"), ("只下载录像", "download")]:
             self.mode.addItem(label, value)
         self.mode.setCurrentIndex(max(0, self.mode.findData(self.values.get("mode"))))
         self.fields["mode"] = self.mode
         form.addRow("本次任务", self.mode)
+        self.mode_hint = QLabel()
+        self.mode_hint.setWordWrap(True)
+        form.addRow(self.mode_hint)
+
+        def show_mode():
+            self.mode_hint.setText(
+                "下载缺少的录像，复用已有笔记；缺少笔记时，复用已有转录或重新转录后生成。云端处理可能产生费用。"
+                if self.mode.currentData() == "download_and_summarize" else
+                "只下载缺少的录像，保留已有文件，不调用语音和笔记服务。")
+
+        self.mode.currentIndexChanged.connect(show_mode)
+        show_mode()
         self.add_text(form, "course_ids", "课程 ID", "多个课程用英文逗号分隔")
         self.add_text(form, "sub_ids", "指定课次（可选）", "留空处理所有可用课次")
-        self.add_path(form, "local_media", "本地音视频", is_file=True)
         self.add_path(form, "out_dir", "课程保存位置")
         self.add_path(form, "summary_dir", "笔记保存位置")
         self.add_text(form, "skip_time_periods", "排除时段（可选）", "例如 32890:星期一早上,evening")
-        redo_notes = QCheckBox("只重新生成笔记（复用已有转录）")
-        redo_notes.setChecked(bool(self.values.get("redo_notes")))
-        self.fields["redo_notes"] = redo_notes
-        form.addRow("", redo_notes)
-        self.overwrite = QCheckBox("重新生成已有转录和笔记")
-        self.overwrite.setChecked(bool(self.values.get("overwrite")))
-        self.fields["overwrite"] = self.overwrite
-        form.addRow("", self.overwrite)
-        redo_notes.toggled.connect(lambda checked: self.overwrite.setChecked(False) if checked else None)
-        self.overwrite.toggled.connect(lambda checked: redo_notes.setChecked(False) if checked else None)
         self.awake = QCheckBox("运行时保持 Mac 唤醒")
         self.awake.setChecked(bool(self.values.get("keep_awake", True)))
         self.fields["keep_awake"] = self.awake
@@ -197,7 +198,7 @@ class MainWindow(QMainWindow):
         config.addRow("时间戳校准", alignment)
         ali_hint = QLabel("自动上传音频并生成原文和同步字幕。支持中断后继续查询。"
                           "模型需支持录音文件异步接口和带时间戳的结果；语言可留空自动识别。"
-                          "已有课程补字幕需勾选“重新生成已有转录和笔记”。")
+                          "已有转录和笔记会保留，切换模型不会自动重做旧课。")
         ali_hint.setWordWrap(True)
         config.addRow(ali_hint)
 
@@ -224,7 +225,7 @@ class MainWindow(QMainWindow):
             field.setValue(int(self.values.get(name, default)))
             self.fields[name] = field
             config.addRow(label, field)
-        hint = QLabel("密码和 API Key 保存到 macOS 钥匙串。音频发送至语音服务，合并后的整课文字发送至笔记服务。"
+        hint = QLabel("密码和 API Key 以明文保存在本机 settings.json 中。音频发送至语音服务，合并后的整课文字发送至笔记服务。"
                       "只有语音服务返回真实时间戳时才生成字幕。已有转录可以继续复用。")
         hint.setWordWrap(True)
         config.addRow(hint)
@@ -238,7 +239,13 @@ class MainWindow(QMainWindow):
         settings_scroll = QScrollArea()
         settings_scroll.setWidgetResizable(True)
         settings_scroll.setWidget(settings)
-        self.tabs.addTab(settings_scroll, "设置")
+        self.settings_index = self.tabs.addTab(settings_scroll, "设置")
+
+        self.elearning = ElearningPanel(self, credential_provider=self.elearning_credentials,
+                                       config_store=elearning_config_store)
+        self.elearning.settingsRequested.connect(lambda: self.tabs.setCurrentIndex(self.settings_index))
+        self.elearning_index = self.tabs.addTab(self.elearning, "eLearning 文件与作业")
+        self.elearning.runningChanged.connect(self.elearning_running_changed)
 
         log_dir = Path.home() / "Library/Logs/Fudan iCourse Subscriber" if preferences is None and initial_values is None else None
         self.panel = TaskPanel(self, log_dir=log_dir)
@@ -254,7 +261,8 @@ class MainWindow(QMainWindow):
         self.panes.setStretchFactor(1, 0)
         self.panes.setSizes([620, 90])
         self.panes.handle(1).setToolTip("上下拖动，调整任务设置和进度区域的高度")
-        actions = QHBoxLayout()
+        self.video_actions = QWidget()
+        actions = QHBoxLayout(self.video_actions)
         self.start = QPushButton("开始任务")
         self.start.setDefault(True)
         self.start.clicked.connect(lambda: self.launch("task"))
@@ -268,11 +276,37 @@ class MainWindow(QMainWindow):
         self.retry.setEnabled(False)
         self.retry.clicked.connect(self.retry_failed)
         actions.addWidget(self.retry)
+        self.verify = QPushButton("完整校验录像…")
+        self.verify.setToolTip("手动逐字节校验所选课程／课次的本地录像，可停止；不登录、不下载、不调用云服务。")
+        self.verify.clicked.connect(lambda: self.launch("verify-videos"))
+        actions.addWidget(self.verify)
+        self.redownload = QPushButton("重新下载指定录像…")
+        self.redownload.setToolTip("需填写课程 ID 和指定课次；验证新录像后替换原录像，保留原文和笔记。")
+        self.redownload.clicked.connect(lambda: self.launch("redownload-videos"))
+        actions.addWidget(self.redownload)
         actions.addStretch()
         actions.addWidget(self.stop)
         actions.addWidget(self.start)
-        layout.addLayout(actions)
+        layout.addWidget(self.video_actions)
+        self.tabs.currentChanged.connect(self.show_task_surface)
         self.setCentralWidget(central)
+
+    def show_task_surface(self, index):
+        video = index != self.elearning_index
+        self.video_actions.setVisible(video)
+        self.progress_scroll.setVisible(video)
+
+    def elearning_running_changed(self, running):
+        for index in range(self.tabs.count()):
+            if index != self.elearning_index:
+                self.tabs.setTabEnabled(index, not running)
+        if self.closing and not running:
+            QTimer.singleShot(0, self.close)
+
+    def elearning_credentials(self):
+        """Called only after explicit in-panel consent; never reloads or saves secrets."""
+        return {"student_id": self.fields["stu_id"].text().strip(),
+                "password": self.fields["uis_psw"].text()}
 
     def show_settings(self, checked):
         self.tabs.setVisible(checked)
@@ -310,6 +344,8 @@ class MainWindow(QMainWindow):
 
     def collect(self):
         values = dict(self.values)
+        # Old saved force flags must never silently re-bill a normal desktop run.
+        values.update(overwrite=False, redo_notes=False, local_media="")
         for name, widget in self.fields.items():
             if isinstance(widget, QComboBox):
                 values[name] = widget.currentText().strip() if widget.isEditable() else widget.currentData()
@@ -326,7 +362,7 @@ class MainWindow(QMainWindow):
             values = self.collect()
             self.preferences.save(values)
             self.values = values
-            self.status.setText("设置已保存，密码与 API Key 已存入系统钥匙串")
+            self.status.setText("设置已保存，密码与 API Key 已存入本地配置文件")
             return True
         except Exception as exc:
             QMessageBox.warning(self, "设置未保存", str(exc))
@@ -337,62 +373,62 @@ class MainWindow(QMainWindow):
         self.fields["llm_timeout_minutes"].setValue(DEFAULT_TIMEOUT_MINUTES)
 
     def command(self, action, values):
+        if action == "redownload-videos":
+            if not values.get("course_ids") or not values.get("sub_ids"):
+                raise ValueError("请填写课程 ID 和指定课次；重新下载仅处理这些录像，保留原文和笔记。")
+            repair = dict(values, mode="download", overwrite=False, redo_notes=False)
+            return self.command("task", repair) + ["--redownload"]
+        if action == "verify-videos":
+            if not values["course_ids"]:
+                raise ValueError("请填写要校验的课程 ID；可用指定课次缩小范围。")
+            return [action, "--out-dir", values["out_dir"], "--course-ids", values["course_ids"],
+                    "--sub-ids", values.get("sub_ids", "")]
         if action != "task":
             return [action]
-        if values["overwrite"] and values.get("redo_notes"):
-            raise ValueError("请选择只重做笔记，或同时重新转录，二者不能同时启用。")
-        if values["mode"] == "local_asr":
-            if not Path(values["local_media"]).is_file():
-                raise ValueError("请选择要转录的音视频文件。")
-            args = ["transcribe", values["local_media"], "--output-dir", values["summary_dir"]]
-        else:
-            if not values["course_ids"]:
-                raise ValueError("请填写课程 ID。")
-            if values["mode"] != "summarize" and not (values["stu_id"] and values["uis_psw"]):
-                raise ValueError("下载课程需要在设置中填写学号和密码。")
-            if values["mode"] != "download" and not all(values[k] for k in ("llm_api_key_1", "llm_base_url_1", "llm_models_1")):
-                raise ValueError("生成笔记需要填写服务地址、模型和 API Key。")
-            args = ["run", "--mode", values["mode"], "--course-ids", values["course_ids"],
-                    "--out-dir", values["out_dir"], "--summary-dir", values["summary_dir"],
-                    "--sub-ids", values["sub_ids"], "--skip-time-periods", values["skip_time_periods"]]
-        if values["overwrite"]:
-            args.append("--overwrite")
-        elif values.get("redo_notes"):
-            if values["mode"] not in ("summarize", "download_and_summarize"):
-                raise ValueError("只重新生成笔记适用于“为本地课程生成笔记”或“下载并生成笔记”。")
-            args.append("--redo-notes")
-        return args
+        if values["mode"] not in {"download", "download_and_summarize"}:
+            raise ValueError("请选择下载录像并生成笔记，或只下载录像。")
+        if not values["course_ids"]:
+            raise ValueError("请填写课程 ID。")
+        if not (values["stu_id"] and values["uis_psw"]):
+            raise ValueError("下载课程需要在设置中填写学号和密码。")
+        if values["mode"] != "download" and not all(values[k] for k in ("llm_api_key_1", "llm_base_url_1", "llm_models_1")):
+            raise ValueError("生成笔记需要填写服务地址、模型和 API Key。")
+        return ["run", "--mode", values["mode"], "--course-ids", values["course_ids"],
+                "--out-dir", values["out_dir"], "--summary-dir", values["summary_dir"],
+                "--sub-ids", values["sub_ids"], "--skip-time-periods", values["skip_time_periods"]]
 
     def launch(self, action, retry_tasks=None):
         if self.process.state() != QProcess.ProcessState.NotRunning or self.group_pid:
             return
         try:
             values = self.collect()
+            if action == "redownload-videos":
+                values.update(mode="download", overwrite=False, redo_notes=False)
             if retry_tasks and self.run_values:
                 # Preserve the run's input/output selection, but allow corrected credentials/models.
                 for key in ("mode", "out_dir", "summary_dir", "local_media"):
                     values[key] = self.run_values[key]
                 values.update(course_ids=",".join(dict.fromkeys(t.course_id for t in retry_tasks)),
                               sub_ids="", skip_time_periods="", overwrite=False, redo_notes=False)
-            if action == "task":
+            if action in {"task", "redownload-videos"}:
                 for name in ("out_dir", "summary_dir"):
                     path = Path(values[name] or defaults()[name]).expanduser()
                     values[name] = str((path if path.is_absolute() else ROOT / path).resolve())
             args = self.command(action, values)
-            if retry_tasks and values["mode"] != "local_asr":
+            if action == "redownload-videos":
+                action = "task"
+            if retry_tasks:
                 for task in retry_tasks:
                     stage = next(name for name, state in task.stages.items() if state.status == "failed")
                     args.extend(["--target", f"{task.course_id}:{task.sub_id}",
                                  "--resume-stage", f"{task.course_id}:{task.sub_id}:{stage}"])
-            env = runtime_environment(values)
+            env = (runtime_environment(values) if action != "verify-videos" else
+                   {k: v for k, v in os.environ.items() if k in {"HOME", "PATH", "TMPDIR", "QT_QPA_PLATFORM", "ICOURSE_STATE_DIR"}})
             if action == "task":
                 # Request access in the native GUI process. The supervised worker
                 # repeats these checks before login or model work.
-                if values["mode"] == "local_asr":
-                    check_directory(Path(values["summary_dir"]), "转录保存位置", writable=True, create=True)
-                else:
-                    check_pipeline_storage(Path(values["out_dir"]), Path(values["summary_dir"]),
-                                           mode=values["mode"], list_only=False)
+                check_pipeline_storage(Path(values["out_dir"]), Path(values["summary_dir"]),
+                                       mode=values["mode"], list_only=False)
         except StorageAccessError as exc:
             QMessageBox.warning(self, "保存位置无法访问", str(exc))
             return
@@ -412,6 +448,7 @@ class MainWindow(QMainWindow):
         self.exit_result = None
         self.engine_pid = None
         self.run_values = dict(values)
+        self.run_action = action
         self.buffer = ""
         self.error_buffer = ""
         self.decoder.reset()
@@ -420,6 +457,8 @@ class MainWindow(QMainWindow):
         self.toggle_settings.setChecked(False)
         self.tabs.setEnabled(False)
         self.start.setEnabled(False)
+        self.verify.setEnabled(False)
+        self.redownload.setEnabled(False)
         self.stop.setEnabled(True)
         self.retry.setEnabled(False)
         self.process.start(sys.executable, ["-m", "src.engine", *args])
@@ -543,9 +582,11 @@ class MainWindow(QMainWindow):
             self.panel.model.finish(code, cancelled=self.cancelled, crashed=crashed)
             self.panel.model.record({}, self.panel.model.heading)
             self.panel.render()
-            self.retry.setEnabled(bool(self.panel.model.counts()["failed"]))
+            self.retry.setEnabled(getattr(self, "run_action", "task") == "task" and bool(self.panel.model.counts()["failed"]))
             self.panel.save_result()
         self.start.setEnabled(True)
+        self.verify.setEnabled(True)
+        self.redownload.setEnabled(True)
         self.tabs.setEnabled(True)
         self.panel.close_log()
         if self.closing:
@@ -561,6 +602,11 @@ class MainWindow(QMainWindow):
             QMessageBox.warning(self, "无法打开保存位置", str(exc))
 
     def closeEvent(self, event):
+        if self.elearning.is_running():
+            self.closing = True
+            self.elearning.stop()
+            event.ignore()
+            return
         if self.process.state() != QProcess.ProcessState.NotRunning or self.group_pid:
             self.closing = True
             if not self.cancelled:
@@ -572,6 +618,10 @@ class MainWindow(QMainWindow):
 
 
 def main():
+    if "--elearning" in sys.argv[1:]:
+        # Dedicated entry never constructs Preferences or loads saved credentials.
+        from .elearning_panel import main as elearning_main
+        return elearning_main()
     app = QApplication.instance() or QApplication(sys.argv[:1])
     app.setApplicationName("iCourse")
     app.setOrganizationName("Fudan iCourse Subscriber")

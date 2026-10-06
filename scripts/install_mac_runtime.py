@@ -1,6 +1,7 @@
 """Install the locked desktop runtime without copying local configuration."""
 
 import argparse
+import json
 import os
 import shutil
 import subprocess
@@ -20,7 +21,7 @@ else:
 
 
 def validate_wheel(wheel: Path) -> None:
-    """Runtime packages contain Python source only, plus standard wheel metadata."""
+    """Allow source, the explicit public eLearning config, and wheel metadata."""
     with zipfile.ZipFile(wheel) as archive:
         for name in archive.namelist():
             path = Path(name)
@@ -29,6 +30,24 @@ def validate_wheel(wheel: Path) -> None:
             if name.endswith("/"):
                 continue
             if path.parts[0] in {"src", "tools"} and path.suffix == ".py":
+                continue
+            if name == "src/elearning_helper/config.json":
+                if archive.getinfo(name).file_size > 64_000:
+                    raise RuntimeError("eLearning 公开配置过大，停止安装。")
+                try:
+                    config = json.loads(archive.read(name))
+                    allowed = {"base_url", "root", "state_dir", "max_bytes", "auth_env", "timezone", "download_hosts", "courses"}
+                    if not isinstance(config, dict) or set(config) - allowed:
+                        raise ValueError("unexpected configuration fields")
+                    if config.get("base_url") != "https://elearning.fudan.edu.cn":
+                        raise ValueError("invalid school base")
+                    courses = config.get("courses")
+                    if not isinstance(courses, list) or not courses:
+                        raise ValueError("missing courses")
+                    if any(not isinstance(course, dict) or set(course) != {"id", "name", "directory"} for course in courses):
+                        raise ValueError("unexpected course fields")
+                except (ValueError, TypeError, UnicodeError):
+                    raise RuntimeError("eLearning 公开配置结构异常，停止安装。") from None
                 continue
             if path.parts[0].startswith("fudan_icourse_subscriber-") and path.parts[0].endswith(".dist-info"):
                 if len(path.parts) == 2 and path.name in {"METADATA", "WHEEL", "RECORD", "entry_points.txt"}:

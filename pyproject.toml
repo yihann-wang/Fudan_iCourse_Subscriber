@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "fudan-icourse-subscriber"
-version = "0.6.6"
+version = "0.6.10"
 description = "iCourse for macOS: cloud transcription and whole-lecture notes"
 readme = "README.md"
 requires-python = ">=3.11,<3.14"
@@ -26,12 +26,12 @@ icourse-mac = "src.mac_gui:main"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src", "tools"]
-include = ["**/*.py"]
+include = ["**/*.py", "src/elearning_helper/config.json"]
 exclude = ["**/.env*", "**/*.md", "**/__pycache__", "**/*.pyc"]
 
 [tool.hatch.build.targets.sdist]
 only-include = ["src", "tools", "scripts", "tests", "docs", "README.md", "CHANGELOG.md", "NOTICE.md", "SHARE_GUIDE.md", "pyproject.toml", "uv.lock", "requirements.txt", ".env.example", ".gitignore", "安装 Mac.command", "启动 iCourse.command"]
-exclude = ["**/.env", "**/.env.*", "**/.icourse*", "**/__pycache__", "**/*.pyc", "**/*.log"]
+exclude = ["**/.env", "**/.env.*", "**/.icourse*", "**/settings.json", "**/__pycache__", "**/*.pyc", "**/*.log"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

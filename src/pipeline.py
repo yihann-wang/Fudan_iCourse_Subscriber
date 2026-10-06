@@ -77,7 +77,12 @@ _PRINT_LOCK = threading.Lock()
 def _log(message: str) -> None:
     """Print one logical message atomically."""
     with _PRINT_LOCK:
-        print(message, flush=True)
+        try:
+            print(message, flush=True)
+        except BrokenPipeError:
+            # A vanished GUI/log consumer must not turn valid video bytes into
+            # a storage failure or trigger another network download.
+            pass
 
 
 def _ts() -> str:
@@ -481,6 +486,9 @@ def _extract_sub_id_from_name(path: Path) -> str | None:
     sub_id is matched as 5+ consecutive digits so we don't pick up the
     4-digit year inside dates like "2026-04-17".
     """
+    # macOS stores resource forks as ._ companions on FAT/exFAT volumes.
+    if path.name.startswith("._"):
+        return None
     stem = path.stem.strip()
     local = re.search(r"_(local-[0-9a-f]{24})$", stem)
     if local:
@@ -534,7 +542,7 @@ def _layout_paths(course_dir: Path) -> tuple[Path, Path, Path]:
 
 def _move_legacy_artifacts_to_layout(course_dir: Path) -> None:
     """Move legacy flat files into 录屏/笔记/原始txt layout."""
-    if not course_dir.exists() or not course_dir.is_dir():
+    if course_dir.is_symlink() or not course_dir.exists() or not course_dir.is_dir():
         return
 
     course_home = _resolve_course_home(course_dir)
@@ -545,7 +553,7 @@ def _move_legacy_artifacts_to_layout(course_dir: Path) -> None:
         (".txt", raw_txt_dir),
     ):
         for file_path in sorted(course_home.glob(f"*{suffix}")):
-            if not file_path.is_file():
+            if file_path.is_symlink() or not file_path.is_file():
                 continue
             if _extract_sub_id_from_name(file_path) is None:
                 continue
@@ -588,7 +596,7 @@ def _collect_local_lectures(course_dirs: list[Path], sub_ids_filter: set[str]) -
         if not course_dir.exists() or not course_dir.is_dir():
             continue
         for video_path in sorted(course_dir.rglob("*.mp4")):
-            if not video_path.is_file():
+            if video_path.name.startswith("._") or not video_path.is_file():
                 continue
             sub_id = _extract_sub_id_from_name(video_path)
             if not sub_id:
@@ -653,7 +661,7 @@ def _resolve_course_dirs(out_dir: Path, course_id: str, course_title: str) -> tu
     return target_dir, same_course_dirs
 
 
-def _find_file_by_sub_id(course_dirs: list[Path], sub_id: str, suffix: str) -> Path | None:
+def _find_file_by_sub_id(course_dirs: list[Path], sub_id: str, suffix: str, **validation) -> Path | None:
     """Find first file whose name encodes the exact sub_id."""
     suffix = suffix.lower()
     for course_dir in course_dirs:
@@ -668,15 +676,15 @@ def _find_file_by_sub_id(course_dirs: list[Path], sub_id: str, suffix: str) -> P
             if file_path.suffix.lower() != suffix:
                 continue
             parsed = _extract_sub_id_from_name(file_path)
-            if parsed == sub_id and valid_artifact(file_path):
+            if parsed == sub_id and valid_artifact(file_path, **validation):
                 return file_path
     return None
 
 
 def _find_file_for_lecture(course_dirs: list[Path], sub_title: str,
-                            sub_id: str, suffix: str) -> Path | None:
+                            sub_id: str, suffix: str, **validation) -> Path | None:
     """Only reuse artifacts with an exact identity; a title is not an ID."""
-    return _find_file_by_sub_id(course_dirs, sub_id, suffix)
+    return _find_file_by_sub_id(course_dirs, sub_id, suffix, **validation)
 
 
 
@@ -733,7 +741,7 @@ def _download_video_with_progress(client, video_url: str, output_path: Path,
                                    chunk_size: int = 1024 * 256,
                                    sub_id: str | None = None,
                                    tag: str = "", prog_key: str | None = None,
-                                   title: str = "") -> Path:
+                                   title: str = "", restart=False) -> Path:
     """Download through the shared resumable transport, with sparse UI ticks."""
     from src.video_download import download_video
 
@@ -770,12 +778,34 @@ def _download_video_with_progress(client, video_url: str, output_path: Path,
         last_print = now
 
     def message(text):
-        events.progress(text, phase="download")
+        events.progress(text, phase="verify" if "校验" in text or "完整性" in text else "download")
         _tlog(f"dl {title} {tag} · {text}")
 
+    last_verify = 0.0
+
+    def verify_progress(done, total):
+        nonlocal last_verify
+        now = time.monotonic()
+        if done == total or now - last_verify >= 0.25:
+            events.progress("正在回读校验录像", phase="verify", unit="bytes", completed=done, total=total)
+            last_verify = now
+
+    def verified(digest):
+        from src.video_checks import remember
+        from src.video_storage import checked_write_json
+        # Use the digest tied to received bytes, never a metadata-signature hash cache.
+        checked_write_json(internal_path(Path(str(output_path) + ".icourse.json")), dict(
+            schema=1, kind="video", sha256=digest, source=None,
+            source_sha256=None, settings_fingerprint=None))
+        remember(output_path, "verified", digest=digest, method="download_readback")
+
+    def begin_video(path):
+        from src.video_storage import checked_write_json
+        checked_write_json(internal_path(Path(str(path) + ".icourse.json")), {"status": "writing"})
+
     download_video(client, video_url, output_path, chunk_size=chunk_size,
-                   progress=progress, message=message, before_replace=_begin_artifact)
-    artifact_metadata(output_path, kind="video")
+                   progress=progress, message=message, before_replace=begin_video,
+                   on_verified=verified, verify_progress=verify_progress, restart=restart)
     return output_path
 
 
@@ -850,7 +880,10 @@ def _stage_failed(in_q, counters, task, stage, exc):
 
 def _download_stage(in_q, out_q, client, sleep_sec, counters):
     from src.icourse import ICourseClient, ReplayNotAvailableError
+    from src.video_download import DownloadedMediaError
+    from src.video_storage import StorageIntegrityError
 
+    storage_failure = ""
     while True:
         task = in_q.get()
         try:
@@ -860,6 +893,8 @@ def _download_stage(in_q, out_q, client, sleep_sec, counters):
                 return
             _stage_event(task, "dl", "running")
             try:
+                if storage_failure:
+                    raise StorageIntegrityError("保存位置出现写入或回读异常，本轮后续下载已暂停。" + storage_failure)
                 video_path = None
                 for attempt in range(3):
                     try:
@@ -870,9 +905,10 @@ def _download_stage(in_q, out_q, client, sleep_sec, counters):
                             client, video_url, task["target_video_path"],
                             sub_id=task["sub_id"], tag=_task_tag(task),
                             prog_key=f"dl:{task['sub_id']}", title=_task_title(task),
+                            restart=bool(task.get("restart_download")) and attempt == 0,
                         )
                         break
-                    except ReplayNotAvailableError:
+                    except (ReplayNotAvailableError, DownloadedMediaError, StorageIntegrityError):
                         raise
                     except Exception as exc:
                         if attempt == 2:
@@ -898,13 +934,15 @@ def _download_stage(in_q, out_q, client, sleep_sec, counters):
                 counters.inc("downloaded")
                 _prog_final(f"dl:{task['sub_id']}", f"dl done {_task_tag(task)} · {video_path.name}")
                 _stage_event(task, "dl", "done")
-                if out_q is not None:
+                if out_q is not None and not task.get("download_only_repair") and not task.get("preserve_summary"):
                     out_q.put(task)
             except ReplayNotAvailableError as exc:
                 mark_stage(in_q, "pending", str(exc))
                 counters.inc("pending")
                 _stage_event(task, "dl", "pending", str(exc))
             except Exception as exc:
+                if isinstance(exc, StorageIntegrityError) and not storage_failure:
+                    storage_failure = str(exc)[:300]
                 _stage_failed(in_q, counters, task, "dl", exc)
             if sleep_sec > 0:
                 time.sleep(sleep_sec)
@@ -923,6 +961,17 @@ def _transcribe_stage(in_q, out_q, transcriber_factory, counters):
             _stage_event(task, "tr", "running")
             try:
                 video = Path(task["video_path"])
+                from src.video_checks import quick_status
+                problem = quick_status(video, video.parent, task["course_id"], task["sub_id"])
+                if problem:
+                    raise RuntimeError(problem)
+                reusable = task.get("reuse_transcript_path")
+                if reusable and valid_artifact(reusable, source=video):
+                    task["target_transcript_path"] = Path(reusable)
+                    _stage_event(task, "tr", "cached", "复用已有转录")
+                    if out_q is not None:
+                        out_q.put(task)
+                    continue
                 transcriber = transcriber_factory()
                 result = transcriber.transcribe_result(
                     str(video), prog_key=f"tr:{task['sub_id']}",
@@ -1066,6 +1115,38 @@ def _make_task(*, lec: dict, course_id: str, course_title: str,
     }
 
 
+def _quick_existing(task, root, path, problem, mode, counters, summary_dirs=()):
+    """Finish a filename-only skip without touching media or following source hashes."""
+    from src.video_checks import safe_regular
+    paths = dict(dl=path)
+    stages = dict(dl="unchecked", tr="na", sm="na")
+    for name, suffix in (("tr", ".txt"), ("sm", ".md")):
+        if mode == "download":
+            continue
+        for folder in summary_dirs:
+            matches = [p for p in Path(folder).rglob("*" + suffix)
+                       if ".icourse" not in p.relative_to(folder).parts
+                       and "待核对" not in p.relative_to(folder).parts
+                       and _extract_sub_id_from_name(p) == task["sub_id"]
+                       and safe_regular(p, folder)]
+            if len(matches) == 1:
+                paths[name] = matches[0]
+                stages[name] = "unchecked"
+                break
+    if problem:
+        stages["dl"] = "queued"
+        events.plan_task(task, stages, **paths)
+        events.stage(task, "dl", "failed", problem)
+        counters.inc("failed")
+        _log(f"[已有录像异常] {_task_tag(task)} · {problem}")
+    else:
+        events.plan_task(task, stages, **paths)
+        counters.inc("download_skipped")
+        if mode != "download":
+            counters.inc("summary_skipped")
+        _log(f"[同名跳过，未校验] {_task_tag(task)} · 未发起转写或笔记生成")
+
+
 def _announce_task(task, entry, mode, *, video=None, transcript=None, summary=None):
     stages = dict(dl="cached" if video else "na", tr="cached" if transcript else "na", sm="na")
     if mode != "download":
@@ -1074,6 +1155,8 @@ def _announce_task(task, entry, mode, *, video=None, transcript=None, summary=No
         names = ("dl", "tr", "sm") if mode != "download" else ("dl",)
         for name in names[names.index(entry):]:
             stages[name] = "queued" if name == entry else "waiting"
+    if task.get("preserve_summary"):
+        stages.update(tr="cached" if transcript else "na", sm="cached")
     events.plan_task(task, stages, dl=video or task.get("target_video_path"),
                      tr=transcript or task.get("target_transcript_path"),
                      sm=summary or task.get("target_summary_path"))
@@ -1160,6 +1243,8 @@ def _build_parser(default_env_file: Path, default_out_dir: Path) -> argparse.Arg
                         help="Retry selected failures from dl, tr or sm, reusing earlier artifacts.")
     parser.add_argument("--redo-notes", action="store_true",
                         help="Regenerate notes using existing verified transcripts; never download or transcribe missing input.")
+    parser.add_argument("--redownload", action="store_true",
+                        help="Replace only selected recordings after readback/media checks; requires download mode and --sub-ids or --target.")
     parser.add_argument(
         "--login-retries",
         type=int,
@@ -1210,6 +1295,9 @@ def _run_main() -> int:
     default_summary_dir = Path.home() / "iCourse" / "笔记" if sys.platform == "darwin" else TOOLS_ROOT / "summary"
     parser = _build_parser(default_env_file, default_out_dir)
     args = parser.parse_args()
+    if args.redownload and (args.mode != "download" or not (args.sub_ids or args.target)
+                            or args.overwrite or args.redo_notes or args.resume_stage):
+        raise ValueError("重新下载录像需使用只下载模式并指定课次，不能同时重做笔记或续接其他阶段。")
     if args.redo_notes and (args.overwrite or args.mode == "download"):
         raise ValueError("只重新生成笔记不能与重新转录或只下载模式同时使用。")
 
@@ -1366,6 +1454,14 @@ def _run_main() -> int:
             for lec in selected:
                 sub_id = str(lec["sub_id"])
                 sub_title = lec.get("sub_title", sub_id)
+                from src.video_checks import quick_status
+                local_path = lec.get("local_path")
+                problem = quick_status(local_path, out_dir, course_id, sub_id) if local_path else ""
+                if problem:
+                    task = _make_task(lec=lec, course_id=course_id, course_title=course_title,
+                                      video_dir=None, notes_dir=notes_dir, raw_txt_dir=raw_txt_dir)
+                    _quick_existing(task, out_dir, local_path, problem, mode, counters, summary_scan_dirs)
+                    continue
                 existing_summary_path = _find_file_for_lecture(summary_scan_dirs, sub_title, sub_id, ".md")
                 existing_transcript_path = _find_file_for_lecture(summary_scan_dirs, sub_title, sub_id, ".txt")
 
@@ -1540,8 +1636,13 @@ def _run_main() -> int:
             continue
 
         course_dir, scan_dirs = _resolve_course_dirs(out_dir, course_id, course_title)
-        for scan_dir in scan_dirs:
-            _move_legacy_artifacts_to_layout(scan_dir)
+        from src.video_checks import has_symlink
+        if any(has_symlink(p, out_dir) for d in scan_dirs for p in (d, d / VIDEO_SUBDIR)):
+            for lec in selected:
+                task = dict(course_id=course_id, sub_id=str(lec["sub_id"]),
+                            course_title=course_title, sub_title=lec.get("sub_title", str(lec["sub_id"])))
+                _quick_existing(task, out_dir, course_dir, "录像目录含符号链接，未复用或写入。", mode, counters)
+            continue
         downloaded_sub_ids = _scan_downloaded_sub_ids(scan_dirs)
         if needs_download and downloaded_sub_ids:
             print(f"  Local downloaded videos (by sub_id scan): {len(downloaded_sub_ids)}")
@@ -1557,8 +1658,6 @@ def _run_main() -> int:
             summary_course_dir, summary_scan_dirs = _resolve_course_dirs(
                 summary_dir, course_id, course_title
             )
-            for scan_dir in summary_scan_dirs:
-                _move_legacy_artifacts_to_layout(scan_dir)
             summarized_sub_ids = _scan_summarized_sub_ids(summary_scan_dirs)
             if summarized_sub_ids:
                 print(f"  Local summaries (by sub_id scan): {len(summarized_sub_ids)}")
@@ -1570,9 +1669,48 @@ def _run_main() -> int:
         for lec in selected:
             sub_id = str(lec["sub_id"])
             sub_title = lec.get("sub_title", sub_id)
-            existing_video_path = _find_file_for_lecture(scan_dirs, sub_title, sub_id, ".mp4")
-            existing_summary_path = _find_file_for_lecture(summary_scan_dirs, sub_title, sub_id, ".md") if needs_summary else None
-            existing_transcript_path = _find_file_for_lecture(summary_scan_dirs, sub_title, sub_id, ".txt") if needs_summary else None
+            from src.video_checks import find_video
+            quick_video, video_problem = find_video(out_dir, course_id, sub_id)
+            resume = resume_stages.get((course_id, sub_id))
+            force_download = needs_download and (args.redownload or resume == "dl")
+            if force_download:
+                from src.video_checks import has_symlink
+                # Repair content/metadata failures, never bypass ambiguous or unsafe paths.
+                unsafe = quick_video is not None and (
+                    video_problem.startswith("同一课次") or has_symlink(quick_video, out_dir)
+                    or not quick_video.is_file())
+                task = _make_task(lec=lec, course_id=course_id, course_title=course_title,
+                                  video_dir=video_dir, notes_dir=notes_dir, raw_txt_dir=raw_txt_dir,
+                                  existing_video_path=quick_video)
+                if unsafe:
+                    _quick_existing(task, out_dir, quick_video, video_problem or "录像路径不安全，未替换。",
+                                    mode, counters, summary_scan_dirs)
+                    continue
+                if quick_video is not None:
+                    task["target_video_path"] = quick_video
+                task["restart_download"] = args.redownload or quick_video is not None
+                # Repair of an existing recording never regenerates its text/notes.
+                task["download_only_repair"] = args.redownload or quick_video is not None
+                _announce_task(task, "dl", "download" if task["download_only_repair"] else mode)
+                download_q.put(task)
+                continue
+            explicit_processing = args.overwrite or args.redo_notes or resume in {"tr", "sm"}
+            if quick_video is not None and (video_problem or (mode == "download" and not explicit_processing)):
+                task = _make_task(lec=lec, course_id=course_id, course_title=course_title,
+                                  video_dir=video_dir, notes_dir=notes_dir, raw_txt_dir=raw_txt_dir,
+                                  existing_video_path=quick_video)
+                _quick_existing(task, out_dir, quick_video, video_problem, mode, counters, summary_scan_dirs)
+                continue
+            existing_video_path = (_find_file_for_lecture(scan_dirs, sub_title, sub_id, ".mp4")
+                                   if explicit_processing else quick_video)
+            # Notes belong to the user even after moving the course directory.
+            # Their own completion/hash checks still apply; an obsolete source
+            # location must not silently cause paid regeneration.
+            existing_summary_path = _find_file_for_lecture(
+                summary_scan_dirs, sub_title, sub_id, ".md", check_source=False) if needs_summary else None
+            existing_transcript_path = _find_file_for_lecture(
+                summary_scan_dirs, sub_title, sub_id, ".txt", source=existing_video_path,
+                check_source=bool(existing_video_path) and (not existing_summary_path or explicit_processing)) if needs_summary else None
 
             resume = resume_stages.get((course_id, sub_id))
             force_transcribe = args.overwrite or resume == "tr"
@@ -1586,6 +1724,12 @@ def _run_main() -> int:
             if needs_summary and not force_transcribe and not redo_notes and existing_summary_path is not None:
                 _log(f"    [skip-summary] summary exists sub_id={sub_id}")
                 counters.inc("summary_skipped")
+                if needs_download and not existing_video_path:
+                    # A saved note alone does not satisfy the video + notes mode.
+                    task["preserve_summary"] = True
+                    _announce_task(task, "dl", mode, transcript=existing_transcript_path, summary=existing_summary_path)
+                    download_q.put(task)
+                    continue
                 if needs_download and existing_video_path:
                     counters.inc("download_skipped")
                 _announce_task(task, None, mode, video=existing_video_path,
@@ -1607,6 +1751,7 @@ def _run_main() -> int:
                 needs_summary
                 and not force_transcribe
                 and existing_transcript_path is not None
+                and existing_video_path is not None
             ):
                 task["target_transcript_path"] = existing_transcript_path
                 _announce_task(task, "sm", mode, video=existing_video_path, transcript=existing_transcript_path)
@@ -1626,6 +1771,10 @@ def _run_main() -> int:
 
             # No existing artifacts → start from download stage (if mode allows)
             if needs_download:
+                if existing_transcript_path is not None and not force_transcribe:
+                    # Validate against the newly downloaded video's hash before
+                    # reusing text whose former source may no longer exist.
+                    task["reuse_transcript_path"] = existing_transcript_path
                 _announce_task(task, "dl", mode)
                 download_q.put(task)
             elif needs_summary:

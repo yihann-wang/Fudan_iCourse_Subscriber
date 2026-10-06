@@ -22,7 +22,7 @@ def qt_app(monkeypatch):
 
 def test_denied_folder_stops_gui_before_engine_launch(qt_app, monkeypatch, tmp_path):
     values = defaults()
-    values.update(mode="summarize", course_ids="12345", llm_base_url_1="https://example.invalid",
+    values.update(mode="download_and_summarize", stu_id="test", uis_psw="test", course_ids="12345", llm_base_url_1="https://example.invalid",
                   llm_models_1="test-model", llm_api_key_1=uuid4().hex,
                   out_dir=str(tmp_path / "videos"), summary_dir=str(tmp_path / "notes"))
     window = mac_gui.MainWindow(initial_values=values)
@@ -132,3 +132,25 @@ def test_custom_model_survives_save_reopen_and_protocol_switch(qt_app, tmp_path)
     assert env['ASR_MODEL'] == 'Vendor/Custom-ASR-v7'
     assert env['ASR_TIMESTAMP_ALIGNMENT'] == 'enabled'
     second.close()
+
+
+@pytest.mark.parametrize('old_mode', ['summarize', 'local_asr', 'download', 'download_and_summarize'])
+def test_only_two_task_modes_and_no_stale_force_flags(qt_app, old_mode):
+    values = defaults()
+    values.update(mode=old_mode, overwrite=True, redo_notes=True, local_media='/old/file.mp4',
+                  stu_id='test', uis_psw='test', course_ids='12345',
+                  llm_api_key_1='test', llm_models_1='test', llm_base_url_1='https://example.invalid')
+    window = mac_gui.MainWindow(initial_values=values)
+    assert window.mode.count() == 2
+    assert set(window.mode.itemData(i) for i in range(2)) == {'download', 'download_and_summarize'}
+    assert not {'local_media', 'overwrite', 'redo_notes'} & window.fields.keys()
+    selected = window.collect()
+    assert selected['overwrite'] is False and selected['redo_notes'] is False and selected['local_media'] == ''
+    args = window.command('task', selected)
+    assert '--overwrite' not in args and '--redo-notes' not in args
+    window.mode.setCurrentIndex(window.mode.findData('download'))
+    selected = window.collect()
+    selected.update(llm_api_key_1='', llm_models_1='', llm_base_url_1='', asr_api_key='')
+    assert window.command('task', selected)[2:4] == ['download', '--course-ids']
+    assert '不调用' in window.mode_hint.text()
+    window.close()

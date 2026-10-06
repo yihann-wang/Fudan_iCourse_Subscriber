@@ -8,6 +8,7 @@
 .icourse_gui_config.json
 .icourse_gui_state.json
 settings.json
+elearning.json
 *.pem
 *.key
 

@@ -6,18 +6,15 @@ Handles:
 - Full 7-step IDP authentication flow against id.fudan.edu.cn
 """
 
-import html as html_mod
 import re
 from binascii import hexlify, unhexlify
 from urllib.parse import urlparse, quote, urljoin
 
 import requests
 from Crypto.Cipher import AES
-from Crypto.PublicKey import RSA
-from Crypto.Cipher import PKCS1_v1_5
-import base64
 
 from . import config
+from .fudan_idp import FudanIDP, encrypt_password
 
 
 def encrypt_host(hostname: str) -> str:
@@ -189,7 +186,6 @@ class WebVPNSession:
         password = password or config.PASSWORD
 
         print("[*] Starting iCourse CAS authentication through WebVPN...")
-        idp_vpn_base = get_vpn_url(config.IDP_BASE)
 
         # Step 1: Initiate CAS login via casapi
         # This is equivalent to clicking "校内用户登录" in the browser.
@@ -242,117 +238,13 @@ class WebVPNSession:
         entity_id = config.ICOURSE_BASE
         print("    lck: OK")
 
-        # Step 2: Query auth methods (through WebVPN)
-        print("[2/7] Querying auth methods (via WebVPN)...")
-        url = get_vpn_url(f"{config.IDP_BASE}/idp/authn/queryAuthMethods")
-        resp = self.session.post(
-            url,
-            json={"lck": lck, "entityId": entity_id},
-            headers={
-                "Content-Type": "application/json",
-                "Referer": f"{idp_vpn_base}/ac/",
-                "Origin": config.WEBVPN_BASE,
-            },
-            timeout=30,
+        # Both applications use the same Fudan IDP protocol; only routing and
+        # the CAS service differ. Keep iCourse's existing callback and check.
+        idp = FudanIDP(
+            lambda method, url, **kwargs: getattr(self.session, method.lower())(url, **kwargs),
+            mapper=get_vpn_url, origin=config.WEBVPN_BASE,
         )
-        data = resp.json()
-        auth_method_list = data.get("data", [])
-        request_type = data.get("requestType", "chain_type")
-
-        auth_chain_code = ""
-        for method in auth_method_list:
-            if method.get("moduleCode") == "userAndPwd":
-                auth_chain_code = method.get("authChainCode", "")
-                break
-        if not auth_chain_code:
-            raise RuntimeError("No authChainCode found in response")
-        print("    authChainCode: OK")
-
-        # Step 3: Get RSA public key (through WebVPN)
-        print("[3/7] Getting RSA public key (via WebVPN)...")
-        url = get_vpn_url(f"{config.IDP_BASE}/idp/authn/getJsPublicKey")
-        resp = self.session.get(
-            url,
-            headers={"Referer": f"{idp_vpn_base}/ac/"},
-            timeout=30,
-        )
-        data = resp.json()
-        pub_key_b64 = data.get("data", "")
-        if not pub_key_b64:
-            raise RuntimeError("Failed to get public key via WebVPN")
-        print("    Got RSA public key")
-
-        # Step 4: Encrypt password
-        print("[4/7] Encrypting password...")
-        encrypted_password = self._encrypt_password(password, pub_key_b64)
-
-        # Step 5: Execute authentication (through WebVPN)
-        print("[5/7] Executing authentication (via WebVPN)...")
-        url = get_vpn_url(f"{config.IDP_BASE}/idp/authn/authExecute")
-        payload = {
-            "authModuleCode": "userAndPwd",
-            "authChainCode": auth_chain_code,
-            "entityId": entity_id,
-            "requestType": request_type,
-            "lck": lck,
-            "authPara": {
-                "loginName": student_id,
-                "password": encrypted_password,
-                "verifyCode": "",
-            },
-        }
-        resp = self.session.post(
-            url,
-            json=payload,
-            headers={
-                "Content-Type": "application/json",
-                "Referer": f"{idp_vpn_base}/ac/",
-                "Origin": config.WEBVPN_BASE,
-            },
-            timeout=30,
-        )
-        data = resp.json()
-
-        if str(data.get("code")) != "200":
-            raise RuntimeError(
-                f"iCourse CAS auth failed (code={data.get('code')})"
-            )
-
-        login_token = data.get("loginToken", "")
-        if not login_token:
-            raise RuntimeError("No loginToken in iCourse CAS response")
-        print("    loginToken: OK")
-
-        # Step 6: Get CAS ticket (through WebVPN)
-        print("[6/7] Getting CAS ticket (via WebVPN)...")
-        url = get_vpn_url(f"{config.IDP_BASE}/idp/authCenter/authnEngine")
-        resp = self.session.post(
-            url,
-            data={"loginToken": login_token},
-            headers={
-                "Referer": f"{idp_vpn_base}/ac/",
-                "Origin": config.WEBVPN_BASE,
-            },
-            timeout=30,
-        )
-        html = resp.text
-
-        # Extract ticket URL from the authnEngine response
-        # The URL may already be rewritten to a WebVPN URL by the proxy
-        ticket_match = re.search(
-            r'locationValue\s*=\s*"([^"]*ticket=[^"]*)"', html
-        )
-        if not ticket_match:
-            ticket_match = re.search(
-                r'(https?://[^\s"\'<>]*ticket=[^\s"\'<>]*)', html
-            )
-        if not ticket_match:
-            raise RuntimeError(
-                f"Failed to extract iCourse ticket URL (response length: {len(html)})"
-            )
-
-        ticket_url = html_mod.unescape(ticket_match.group(1))
-        print("    Ticket extracted.")
+        ticket_url = idp.authenticate(student_id, password, lck, entity_id)
 
         # Step 7: Follow ticket to iCourse (through WebVPN)
         print("[7/7] Following ticket to iCourse (via WebVPN)...")
@@ -435,156 +327,27 @@ class WebVPNSession:
         print("    lck: OK")
         return lck, entity_id
 
-    def _query_auth_methods(
-        self, lck: str, entity_id: str
-    ) -> tuple[str, str]:
-        """Step 2: Query available authentication methods."""
-        url = f"{config.IDP_BASE}/idp/authn/queryAuthMethods"
-        resp = self.session.post(
-            url,
-            json={"lck": lck, "entityId": entity_id},
-            headers={
-                "Content-Type": "application/json",
-                "Referer": f"{config.IDP_BASE}/ac/",
-                "Origin": config.IDP_BASE,
-            },
-            timeout=30,
+    def _idp(self):
+        return FudanIDP(
+            lambda method, url, **kwargs: getattr(self.session, method.lower())(url, **kwargs)
         )
-        data = resp.json()
 
-        # data["data"] is a list of auth methods; pick the userAndPwd one
-        # authChainCode for userAndPwd is in the list items;
-        # requestType is at the top level
-        auth_method_list = data.get("data", [])
-        request_type = data.get("requestType", "chain_type")
-
-        auth_chain_code = ""
-        for method in auth_method_list:
-            if method.get("moduleCode") == "userAndPwd":
-                auth_chain_code = method.get("authChainCode", "")
-                break
-
-        if not auth_chain_code:
-            raise RuntimeError("Failed to get authChainCode")
-
-        print("    authChainCode: OK")
-        return auth_chain_code, request_type
+    def _query_auth_methods(self, lck: str, entity_id: str) -> tuple[str, str]:
+        return self._idp().query_methods(lck, entity_id)
 
     def _get_public_key(self) -> str:
-        """Step 3: Get RSA public key for password encryption."""
-        url = f"{config.IDP_BASE}/idp/authn/getJsPublicKey"
-        resp = self.session.get(
-            url,
-            headers={
-                "Referer": f"{config.IDP_BASE}/ac/",
-            },
-            timeout=30,
-        )
-        data = resp.json()
-        pub_key_b64 = data.get("data", "")
-        if not pub_key_b64:
-            raise RuntimeError("Failed to get public key")
-
-        print("    Got RSA public key")
-        return pub_key_b64
+        return self._idp().public_key()
 
     def _encrypt_password(self, password: str, pub_key_b64: str) -> str:
-        """Step 4: RSA-encrypt the password with PKCS1_v1_5."""
-        # Construct PEM format
-        pem = (
-            "-----BEGIN PUBLIC KEY-----\n"
-            + pub_key_b64
-            + "\n-----END PUBLIC KEY-----"
-        )
-        rsa_key = RSA.import_key(pem)
-        cipher = PKCS1_v1_5.new(rsa_key)
-        encrypted = cipher.encrypt(password.encode("utf-8"))
-        return base64.b64encode(encrypted).decode("ascii")
+        return encrypt_password(password, pub_key_b64)
 
-    def _auth_execute(
-        self,
-        student_id: str,
-        encrypted_password: str,
-        lck: str,
-        entity_id: str,
-        auth_chain_code: str,
-        request_type: str,
-    ) -> str:
-        """Step 5: Execute authentication and get loginToken."""
-        url = f"{config.IDP_BASE}/idp/authn/authExecute"
-        payload = {
-            "authModuleCode": "userAndPwd",
-            "authChainCode": auth_chain_code,
-            "entityId": entity_id,
-            "requestType": request_type,
-            "lck": lck,
-            "authPara": {
-                "loginName": student_id,
-                "password": encrypted_password,
-                "verifyCode": "",
-            },
-        }
-        resp = self.session.post(
-            url,
-            json=payload,
-            headers={
-                "Content-Type": "application/json",
-                "Referer": f"{config.IDP_BASE}/ac/",
-                "Origin": config.IDP_BASE,
-            },
-            timeout=30,
-        )
-        data = resp.json()
-
-        if str(data.get("code")) != "200":
-            raise RuntimeError(
-                f"Authentication failed (code={data.get('code')})"
-            )
-
-        # loginToken is at top level, not nested under "data"
-        login_token = data.get("loginToken", "")
-        if not login_token:
-            raise RuntimeError("No loginToken in response")
-
-        print("    loginToken: OK")
-        return login_token
+    def _auth_execute(self, student_id, encrypted_password, lck, entity_id,
+                      auth_chain_code, request_type):
+        return self._idp().execute(student_id, encrypted_password, lck, entity_id,
+                                   auth_chain_code, request_type)
 
     def _get_cas_ticket(self, login_token: str) -> str:
-        """Step 6: Exchange loginToken for a CAS ticket URL."""
-        url = f"{config.IDP_BASE}/idp/authCenter/authnEngine"
-        resp = self.session.post(
-            url,
-            data={"loginToken": login_token},
-            headers={
-                "Referer": f"{config.IDP_BASE}/ac/",
-                "Origin": config.IDP_BASE,
-            },
-            timeout=30,
-        )
-
-        # The response is HTML containing a JS redirect with the ticket URL
-        html = resp.text
-
-        # Extract the locationValue from the JavaScript
-        ticket_match = re.search(
-            r'locationValue\s*=\s*"([^"]*ticket=[^"]*)"', html
-        )
-        if not ticket_match:
-            # Fallback: any URL with ticket= parameter
-            ticket_match = re.search(
-                r'(https?://[^\s"\'<>]*ticket=[^\s"\'<>]*)', html
-            )
-
-        if not ticket_match:
-            raise RuntimeError(
-                f"Failed to extract ticket URL (response length: {len(html)})"
-            )
-
-        ticket_url = ticket_match.group(1)
-        # Unescape HTML entities (e.g., &amp; -> &)
-        ticket_url = html_mod.unescape(ticket_url)
-        print("    Ticket extracted.")
-        return ticket_url
+        return self._idp().ticket(login_token)
 
     def _establish_session(self, ticket_url: str):
         """Step 7: Follow the ticket URL to establish WebVPN session.

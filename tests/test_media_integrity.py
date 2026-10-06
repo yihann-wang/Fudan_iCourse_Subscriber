@@ -108,6 +108,8 @@ def test_probe_rejects_partial_media_before_ffprobe_or_asr(tmp_path, monkeypatch
 def test_download_does_not_accept_truncation_even_if_http_length_matches(tmp_path, monkeypatch, legacy, has_length):
     from src.icourse import ICourseClient
     from src.pipeline import _download_video_with_progress
+    from src.video_download import DownloadedMediaError, _paths
+    from src.video_storage import checkpoint_path
 
     video = tmp_path / "lecture.mp4"
     video.write_bytes(b"previous recording")
@@ -119,13 +121,15 @@ def test_download_does_not_accept_truncation_even_if_http_length_matches(tmp_pat
                                iter_content=lambda **kw: iter([body]))
     client = ICourseClient(None)
     monkeypatch.setattr(client, "get_video_response", lambda *_, **kw: response)
-    with pytest.raises(IncompleteMediaError):
+    with pytest.raises(DownloadedMediaError, match="录像未下载完整") as error:
         if legacy:
             client.download_video("https://example.invalid/video", str(video))
         else:
             _download_video_with_progress(client, "https://example.invalid/video", video)
     assert video.read_bytes() == b"previous recording"
-    assert not list(tmp_path.rglob("*.json"))
+    assert isinstance(error.value.__cause__, IncompleteMediaError)
+    assert _paths(video)[0].read_bytes() == body
+    assert checkpoint_path(video).is_file()
     assert not list(tmp_path.glob("*.tmp"))
     response.close.assert_called_once()
 

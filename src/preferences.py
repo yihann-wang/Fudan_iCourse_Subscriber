@@ -1,9 +1,8 @@
-"""Ordinary preferences in Application Support; credentials in Keychain."""
+"""Settings and credentials in one local JSON file; import old Keychain data once."""
 
 import json
 import os
 import re
-import uuid
 from pathlib import Path
 from urllib.parse import urlsplit, urlunsplit
 
@@ -69,9 +68,6 @@ def migrate_dashscope_settings(values):
 class Preferences:
     def __init__(self, path=None, keyring_backend=None):
         self.path = Path(path) if path else user_config_path(SERVICE, appauthor=False) / "settings.json"
-        if keyring_backend is None:
-            import keyring
-            keyring_backend = keyring
         self.keyring = keyring_backend
         self.profile = None
 
@@ -79,13 +75,21 @@ class Preferences:
         values = defaults()
         source = self.path if self.path.exists() else Path(legacy_path) if legacy_path else None
         saved = {}
+        migrate_credentials = False
         if source and source.exists():
             saved = json.loads(source.read_text(encoding="utf-8"))
             values.update({k: v for k, v in saved.items() if k in values})
             self.profile = saved.get("secret_profile")
-            if self.profile:
+            if self.profile and saved.get("credential_storage") != "file":
+                # Only old installations need a one-time read. Normal startup
+                # and every save use the local settings file exclusively.
+                vault = self.keyring
+                if vault is None:
+                    import keyring
+                    vault = keyring
                 for field in SECRET_FIELDS:
-                    values[field] = self.keyring.get_password(SERVICE, f"{self.profile}:{field}") or ""
+                    values[field] = vault.get_password(SERVICE, f"{self.profile}:{field}") or ""
+                migrate_credentials = True
         for field in ("out_dir", "summary_dir"):
             if os.name != "nt" and re.match(r"^[A-Za-z]:[\\/]", str(values[field])):
                 values[field] = defaults()[field]
@@ -93,22 +97,19 @@ class Preferences:
             values[field] = as_bool(values[field])
         if "asr_provider" not in saved:
             migrate_dashscope_settings(values)
+        if migrate_credentials:
+            # Publish only after all old credentials were read successfully.
+            # On failure the old settings and Keychain items remain intact.
+            self.save(values)
         return values
 
     def save(self, values):
-        # New vault entries make a save transactional with the settings file:
-        # failed disk writes cannot change credentials of the previous profile.
-        profile = uuid.uuid4().hex
-        # If Keychain fails, no plaintext fallback is written.
-        for field in SECRET_FIELDS:
-            secret = str(values.get(field, ""))
-            self.keyring.set_password(SERVICE, f"{profile}:{field}", secret)
-            if self.keyring.get_password(SERVICE, f"{profile}:{field}") != secret:
-                raise RuntimeError("系统钥匙串保存验证失败。")
-        public = {k: v for k, v in values.items() if k in defaults() and k not in SECRET_FIELDS}
-        public.update(schema=1, secret_profile=profile)
-        atomic_write_json(self.path, public, private=True)
-        self.profile = profile
+        saved = {k: v for k, v in values.items() if k in defaults()}
+        saved.update(schema=2, credential_storage="file")
+        # One atomic file update keeps passwords and ordinary settings together.
+        # No separate vault, encryption password or permission setup is used.
+        atomic_write_json(self.path, saved)
+        self.profile = None
 
 
 def runtime_environment(values, base=None):
