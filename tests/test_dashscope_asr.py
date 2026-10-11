@@ -7,6 +7,7 @@ from types import SimpleNamespace
 from uuid import uuid4
 
 import pytest
+import requests
 
 from src.asr.client import CloudWorker
 from src.asr.cloud import SpeechAPIError
@@ -170,6 +171,157 @@ def test_poll_failure_resumes_task_without_reupload_or_rebill(ali_server, tmp_pa
         api.close()
     assert [call[0] for call in ali_server['requests']].count('POST') == 2
     assert ali_server['requests'][4][1] == '/api/v1/tasks/known-job'
+
+
+def test_policy_outage_recovers_before_one_submission(ali_server, tmp_path, monkeypatch):
+    media, state, settings = setup(ali_server, tmp_path)
+    settings = replace(settings, retries=2)
+    ali_server['responses'] = [(503, {}), (502, {}), (200, policy(ali_server)), (200, {}),
+        (200, {'output': {'task_id': 'one-job'}}), (200, success(ali_server)), (200, transcript())]
+    delays, notices = [], []
+    monkeypatch.setattr('src.asr.dashscope.time.sleep', delays.append)
+    api = DashScopeAPI(settings)
+    try:
+        assert api.transcribe(media, 3, task_path=state, progress=notices.append)['text']
+    finally:
+        api.close()
+    assert delays == [30, 60]
+    assert sum(call[1].endswith('/transcription') for call in ali_server['requests']) == 1
+    retries = [n['message'] for n in notices if n['event'] == 'retry']
+    assert len(retries) == 2 and all('获取上传凭证' in text for text in retries)
+    assert '30 秒' in retries[0] and '60 秒' in retries[1]
+    assert not any('正在上传音频' in n['message'] for n in notices[:3])
+
+
+def test_query_and_result_outages_keep_original_submission(ali_server, tmp_path, monkeypatch):
+    media, state, settings = setup(ali_server, tmp_path)
+    settings = replace(settings, retries=1)
+    ali_server['responses'] = [(200, policy(ali_server)), (200, {}),
+        (200, {'output': {'task_id': 'original-job'}}), (503, {}),
+        (200, success(ali_server)), (502, {}), (200, transcript())]
+    notices = []
+    monkeypatch.setattr('src.asr.dashscope.time.sleep', lambda _: None)
+    api = DashScopeAPI(settings)
+    try:
+        assert api.transcribe(media, 3, task_path=state, progress=notices.append)['segments']
+    finally:
+        api.close()
+    assert json.loads(state.read_text())['task_id'] == 'original-job'
+    assert sum(call[1].endswith('/transcription') for call in ali_server['requests']) == 1
+    retries = [n['message'] for n in notices if n['event'] == 'retry']
+    assert '查询任务状态' in retries[0] and '取回识别结果' in retries[1]
+
+
+@pytest.mark.parametrize('error_type,label', [
+    (requests.exceptions.ProxyError, '代理连接失败'),
+    (requests.exceptions.SSLError, 'TLS 安全连接失败'),
+    (requests.exceptions.ConnectTimeout, '建立连接超时'),
+    (requests.exceptions.ReadTimeout, '读取响应超时'),
+    (requests.exceptions.ConnectionError, '连接失败或中断'),
+    (requests.exceptions.ChunkedEncodingError, '响应传输中断'),
+])
+def test_network_diagnostics_retain_type_without_secrets(tmp_path, monkeypatch, error_type, label):
+    secret = uuid4().hex
+    api = DashScopeAPI(ASRSettings(provider='dashscope', base_url=DASHSCOPE_BASE_URL,
+                                  model='fun-asr', api_key=secret, retries=0))
+    def fail(*args, **kwargs):
+        raise error_type(f'{secret} https://proxy-user:proxy-password@private.invalid/?Signature=private')
+    monkeypatch.setattr(api.session, 'request', fail)
+    try:
+        with pytest.raises(SpeechAPIError) as error:
+            api._json('GET', DASHSCOPE_BASE_URL + '/uploads', phase='获取上传凭证')
+    finally:
+        api.close()
+    text = str(error.value)
+    assert label in text and error_type.__name__ in text and '尚未提交' in text
+    assert all(value not in text for value in [secret, 'https://', 'proxy-user', 'proxy-password', 'Signature'])
+
+
+def test_dns_and_os_error_codes_survive_redaction():
+    import errno
+    import socket
+    from src.asr.dashscope import _network_failure
+    dns = requests.exceptions.ConnectionError(socket.gaierror(socket.EAI_NONAME, 'private-host'))
+    assert '域名解析失败' in str(_network_failure(dns, '查询任务状态'))
+    reset = requests.exceptions.ConnectionError(ConnectionResetError(errno.ECONNRESET, 'private-url'))
+    text = str(_network_failure(reset, '取回识别结果'))
+    assert 'ECONNRESET' in text and '任务编号' in text and 'private' not in text
+
+
+def test_exhausted_policy_connections_do_not_claim_submitted_task(ali_server, tmp_path, monkeypatch):
+    media, state, settings = setup(ali_server, tmp_path)
+    api = DashScopeAPI(replace(settings, retries=2))
+    calls, delays, notices = [], [], []
+    def fail(method, url, **kwargs):
+        calls.append((method, url))
+        raise requests.exceptions.ConnectionError('private transport details')
+    monkeypatch.setattr(api.session, 'request', fail)
+    monkeypatch.setattr('src.asr.dashscope.time.sleep', delays.append)
+    try:
+        with pytest.raises(SpeechAPIError, match='获取上传凭证.*尚未提交'):
+            api.transcribe(media, 3, task_path=state, progress=notices.append)
+    finally:
+        api.close()
+    assert len(calls) == 3 and all(method == 'GET' and url.endswith('/uploads') for method, url in calls)
+    assert delays == [30, 60] and not state.exists()
+    assert len([n for n in notices if n['event'] == 'retry']) == 2
+
+
+def test_submission_connection_loss_remains_uncertain_without_retry(ali_server, tmp_path, monkeypatch):
+    media, state, settings = setup(ali_server, tmp_path)
+    api = DashScopeAPI(replace(settings, retries=5))
+    ali_server['responses'] = [(200, policy(ali_server)), (200, {})]
+    real_request, submissions = api.session.request, []
+    def request(method, url, **kwargs):
+        if url.endswith('/transcription'):
+            submissions.append(url)
+            raise requests.exceptions.ReadTimeout('lost billable response')
+        return real_request(method, url, **kwargs)
+    monkeypatch.setattr(api.session, 'request', request)
+    try:
+        with pytest.raises(SpeechAPIError, match='提交识别任务.*提交结果不确定'):
+            api.transcribe(media, 3, task_path=state)
+        assert json.loads(state.read_text())['phase'] == 'submitting'
+        with pytest.raises(SpeechAPIError, match='上次提交结果不确定'):
+            api.transcribe(media, 3, task_path=state)
+    finally:
+        api.close()
+    assert len(submissions) == 1
+
+
+def test_cancel_interrupts_retry_wait_without_submitting(ali_server, tmp_path):
+    import time
+    from src.media import CancelledError
+    media, state, settings = setup(ali_server, tmp_path)
+    worker = CloudWorker(replace(settings, retries=2))
+    ali_server['responses'] = [(503, {})]
+    cancel = threading.Event()
+    def progress(event):
+        if event['event'] == 'retry':
+            cancel.set()
+    started = time.monotonic()
+    try:
+        with pytest.raises(CancelledError):
+            worker.request(media, duration=3, task_path=state, cancel=cancel, progress=progress)
+    finally:
+        worker.close()
+    assert time.monotonic() - started < 10
+    assert not state.exists() and len(ali_server['requests']) == 1
+
+
+def test_worker_allows_combined_transport_and_polling_budget(tmp_path, monkeypatch):
+    import io
+    settings = ASRSettings(provider='dashscope', base_url=DASHSCOPE_BASE_URL, model='fun-asr')
+    worker = CloudWorker(settings)
+    moments = iter([0, 1, 1400])  # Valid combined phases exceed the old 1305 s watchdog.
+    monkeypatch.setattr('src.asr.client.time.monotonic', lambda: next(moments))
+    monkeypatch.setattr(worker, '_start', lambda: None)
+    monkeypatch.setattr(worker, 'close', lambda: None)
+    worker.process = SimpleNamespace(stdin=io.StringIO())
+    worker.messages.put(dict(event='progress', message='恢复查询'))
+    worker.messages.put(dict(event='result', text='完成'))
+    assert worker.request(tmp_path / 'audio.mp3', duration=3)['text'] == '完成'
+    worker.process = None
 
 
 def test_uncertain_submission_is_not_automatically_repeated(ali_server, tmp_path):

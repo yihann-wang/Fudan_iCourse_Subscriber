@@ -49,7 +49,12 @@ class CloudWorker:
         with self.lock:
             if cancel is not None and cancel.is_set():
                 raise CancelledError("转录已取消。")
-            timeout = timeout or (self.settings.timeout_seconds + 15) * (self.settings.retries + 1) + 360
+            if timeout is None:
+                if self.settings.provider == "dashscope":
+                    from .dashscope import worker_timeout
+                    timeout = worker_timeout(self.settings)
+                else:
+                    timeout = (self.settings.timeout_seconds + 15) * (self.settings.retries + 1) + 360
             self._start()
             self.process.stdin.write(json.dumps(dict(op="check" if path is None else "transcribe",
                                                      settings=asdict(self.settings), path=str(path), duration=duration,

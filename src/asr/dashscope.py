@@ -5,9 +5,11 @@ go to the configured API; OSS uploads use the short-lived policy and result
 downloads use their signed URL. Neither URL nor policy is persisted or logged.
 """
 
+import errno
 import json
 import math
 import re
+import socket
 import time
 from pathlib import Path
 from urllib.parse import urlsplit
@@ -21,6 +23,61 @@ from .cloud import SpeechAPIError, parse_response
 
 # Documented file-ASR outcomes, not model names or heuristic message matching.
 _EMPTY_RESULT_CODES = frozenset({"ASR_RESPONSE_HAVE_NO_WORDS", "SUCCESS_WITH_NO_VALID_FRAGMENT"})
+
+
+def retry_delay(attempt):
+    """Leave time for brief outages; only read-only requests use this backoff."""
+    return min(30 * 2 ** attempt, 60)
+
+
+def worker_timeout(settings):
+    """Budget policy, upload, submit, polling and result retrieval separately."""
+    request = 15 + min(60, settings.timeout_seconds)
+    read_budget = request * (settings.retries + 1) + sum(
+        retry_delay(i) for i in range(settings.retries))
+    return 3 * read_budget + (15 + settings.timeout_seconds) + request + settings.timeout_seconds + 60
+
+
+def _recovery_hint(phase):
+    if phase in {"获取上传凭证", "上传音频"}:
+        return "尚未提交识别任务；可重试，已完成块会复用。"
+    if phase == "提交识别任务":
+        return "提交结果不确定，不会自动重复提交；请先核对云端任务。"
+    if phase in {"查询任务状态", "取回识别结果"}:
+        return "已保留任务编号；重试继续获取原任务结果，不会重新提交。"
+    return "请稍后重试。"
+
+
+def _network_failure(exc, phase):
+    # Never stringify transport exceptions: they can contain signed URLs,
+    # proxy passwords or headers. Keep only known types and OS error names.
+    pending, seen, codes, dns = [exc], set(), [], False
+    while pending and len(seen) < 20:
+        item = pending.pop(0)
+        if id(item) in seen:
+            continue
+        seen.add(id(item))
+        dns = dns or isinstance(item, socket.gaierror)
+        code = errno.errorcode.get(getattr(item, "errno", None))
+        if code and code not in codes:
+            codes.append(code)
+        pending.extend(value for value in (
+            getattr(item, "__cause__", None), getattr(item, "__context__", None),
+            getattr(item, "reason", None), *getattr(item, "args", ()),
+        ) if isinstance(value, BaseException))
+    kinds = ((requests.exceptions.ProxyError, "代理连接失败", "ProxyError"),
+             (requests.exceptions.SSLError, "TLS 安全连接失败", "SSLError"),
+             (requests.exceptions.ConnectTimeout, "建立连接超时", "ConnectTimeout"),
+             (requests.exceptions.ReadTimeout, "读取响应超时", "ReadTimeout"),
+             (requests.exceptions.Timeout, "请求超时", "Timeout"),
+             (requests.exceptions.ConnectionError, "连接失败或中断", "ConnectionError"),
+             (requests.exceptions.ChunkedEncodingError, "响应传输中断", "ChunkedEncodingError"))
+    label, kind = next(((label, kind) for cls, label, kind in kinds if isinstance(exc, cls)),
+                       ("网络请求失败", "RequestException"))
+    if dns:
+        label = "域名解析失败"
+    detail = "，".join([kind, *codes[:2]])
+    return SpeechAPIError(f"阿里云{phase}失败：{label}（{detail}）。{_recovery_hint(phase)}")
 
 
 def _is_empty_recognition(output):
@@ -134,13 +191,13 @@ def parse_dashscope_result(value, duration):
 
 
 class _HTTPFailure(SpeechAPIError):
-    def __init__(self, status):
+    def __init__(self, status, phase="请求"):
         self.status = status
         detail = {400: "请核对模型和参数", 401: "API Key 无效或地域不匹配",
                   403: "无权访问，请核对模型开通状态、地域和余额",
                   404: "接口或云端任务不存在；旧任务可能已过期",
                   413: "音频过大，请缩短音频块", 429: "请求限流或额度不足"}
-        super().__init__(f"阿里云语音服务 HTTP {status}：{detail.get(status, '服务暂时不可用')}。")
+        super().__init__(f"阿里云{phase} HTTP {status}：{detail.get(status, '服务暂时不可用')}。")
 
 
 class DashScopeAPI:
@@ -178,23 +235,23 @@ class DashScopeAPI:
         saved = "失败诊断已保留；" if task_path else ""
         raise SpeechAPIError(f"{label}（{reason}）。{saved}可据错误码核对后重试，已完成块无需重做。")
 
-    def _json(self, method, url, *, authenticated=False, retry=False, progress=None, **kwargs):
+    def _json(self, method, url, *, authenticated=False, retry=False, progress=None, phase="请求", **kwargs):
         headers = dict(kwargs.pop("headers", {}))
         if authenticated:
             if not self.settings.api_key:
                 raise SpeechAPIError("请填写阿里云百炼的语音 API Key。")
             headers["Authorization"] = "Bearer " + self.settings.api_key
-        attempts = self.settings.retries + 1 if retry else 1
+        attempts = self.settings.retries + 1 if retry and method == "GET" else 1
         for attempt in range(attempts):
             try:
                 response = self.session.request(method, url, headers=headers,
                     timeout=(15, min(60, self.settings.timeout_seconds)), allow_redirects=False, **kwargs)
-            except requests.RequestException:
-                error = SpeechAPIError("阿里云连接失败或超时；已提交的任务将在重试时继续查询。")
+            except requests.RequestException as exc:
+                error = _network_failure(exc, phase)
             else:
                 try:
                     if response.status_code not in (200, 201, 202):
-                        error = _HTTPFailure(response.status_code)
+                        error = _HTTPFailure(response.status_code, phase)
                         if response.status_code not in (408, 429, 500, 502, 503, 504):
                             raise error
                     else:
@@ -208,10 +265,12 @@ class DashScopeAPI:
                 finally:
                     response.close()
             if attempt + 1 == attempts:
-                raise error
+                raise error from None
+            delay = retry_delay(attempt)
             if progress:
-                progress(dict(event="retry", message="阿里云暂时不可用，正在重试查询"))
-            time.sleep(min(2 ** (attempt + 1), 20))
+                progress(dict(event="retry", message=f"{error} {delay} 秒后重试{phase}"
+                              f"（{attempt + 1}/{self.settings.retries}）"))
+            time.sleep(delay)
 
     def _storage_url(self, value):
         url = urlsplit(value)
@@ -222,9 +281,10 @@ class DashScopeAPI:
             raise SpeechAPIError("阿里云返回了非预期的文件地址，已停止传输。")
         return value
 
-    def _policy(self):
+    def _policy(self, progress=None):
         value = self._json("GET", self.settings.base_url + "/uploads", authenticated=True,
-                           retry=True, params={"action": "getPolicy", "model": self.settings.model})
+                           retry=True, progress=progress, phase="获取上传凭证",
+                           params={"action": "getPolicy", "model": self.settings.model})
         try:
             policy = value["data"]
             for key in ("upload_host", "upload_dir", "oss_access_key_id", "policy", "signature",
@@ -242,8 +302,10 @@ class DashScopeAPI:
         self._policy()
         return dict(message="阿里云连接成功，已取得所选模型的上传凭证；未上传音频、未提交转录。实际识别权限以任务结果为准。")
 
-    def _upload(self, path):
-        policy = self._policy()
+    def _upload(self, path, progress=None):
+        if progress:
+            progress(dict(event="progress", message="阿里云转录 · 正在获取上传凭证"))
+        policy = self._policy(progress)
         if path.stat().st_size > float(policy.get("max_file_size_mb", self.settings.max_upload_mb)) * 1000000:
             raise SpeechAPIError("音频超过阿里云上传限制，请缩短音频块。")
         # Do not disclose course names in remote object paths.
@@ -251,16 +313,18 @@ class DashScopeAPI:
         form = {"OSSAccessKeyId": policy["oss_access_key_id"], "policy": policy["policy"],
                 "Signature": policy["signature"], "key": key, "x-oss-object-acl": "private",
                 "x-oss-forbid-overwrite": policy["x_oss_forbid_overwrite"], "success_action_status": "200"}
+        if progress:
+            progress(dict(event="progress", message="阿里云转录 · 正在上传音频"))
         try:
             with path.open("rb") as audio:
                 response = self.session.post(policy["upload_host"], data=form,
                     files={"file": ("audio.mp3", audio, "audio/mpeg")},
                     timeout=(15, self.settings.timeout_seconds), allow_redirects=False)
-        except requests.RequestException:
-            raise SpeechAPIError("阿里云音频上传失败或超时，尚未提交转录任务，可重试。") from None
+        except requests.RequestException as exc:
+            raise _network_failure(exc, "上传音频") from None
         try:
             if response.status_code not in (200, 201, 204):
-                raise _HTTPFailure(response.status_code)
+                raise _HTTPFailure(response.status_code, "上传音频")
         finally:
             response.close()
         return "oss://" + key
@@ -319,8 +383,7 @@ class DashScopeAPI:
                 raise SpeechAPIError("上次提交结果不确定，已停止自动重复提交。请在百炼核对任务，再清除此课转录缓存后重试。")
             notice("阿里云转录 · 恢复已提交任务，继续查询")
         else:
-            notice("阿里云转录 · 正在上传音频")
-            file_url = self._upload(path)
+            file_url = self._upload(path, progress)
             parameters = {"channel_id": [0]}
             if self.settings.language:
                 parameters["language_hints"] = [s for s in re.split(r"[,，\s]+", self.settings.language) if s]
@@ -328,8 +391,10 @@ class DashScopeAPI:
                 parameters["timestamp_alignment_enabled"] = self.settings.timestamp_alignment == "enabled"
             state["phase"] = "submitting"
             save()  # A lost response must not silently submit a second billable job.
+            notice("阿里云转录 · 正在提交识别任务")
             try:
                 submitted = self._json("POST", self.settings.base_url + "/services/audio/asr/transcription",
+                    phase="提交识别任务",
                     authenticated=True, headers={"X-DashScope-Async": "enable", "X-DashScope-OssResourceResolve": "enable"},
                     json={"model": self.settings.model, "input": {"file_urls": [file_url]}, "parameters": parameters})
             except _HTTPFailure as exc:
@@ -351,7 +416,7 @@ class DashScopeAPI:
         deadline, previous_status = time.monotonic() + self.settings.timeout_seconds, None
         while True:
             result = self._json("GET", self.settings.base_url + "/tasks/" + task_id,
-                                authenticated=True, retry=True, progress=progress)
+                                authenticated=True, retry=True, progress=progress, phase="查询任务状态")
             output = result.get("output", {})
             if not isinstance(output, dict):
                 raise SpeechAPIError("阿里云任务响应格式无效，已保留任务编号。")
@@ -368,7 +433,8 @@ class DashScopeAPI:
                     self._task_failure(output, state, task_path, subtask=True)
                 url = self._storage_url(results[0].get("transcription_url", ""))
                 notice("阿里云转录 · 正在获取文字和字幕时间戳")
-                payload = parse_dashscope_result(self._json("GET", url, retry=True, progress=progress), duration)
+                payload = parse_dashscope_result(self._json("GET", url, retry=True, progress=progress,
+                                                           phase="取回识别结果"), duration)
                 return finish(payload)
             if status in ("FAILED", "CANCELED"):
                 self._task_failure(output, state, task_path)
