@@ -16,15 +16,15 @@ from urllib.parse import urlsplit
 from zoneinfo import ZoneInfo
 
 from PySide6.QtCore import QProcess, QProcessEnvironment, QTimer, Qt, QUrl, Signal
-from PySide6.QtGui import QColor, QDesktopServices
+from PySide6.QtGui import QColor, QDesktopServices, QPalette
 from PySide6.QtWidgets import (
     QApplication, QDialog, QFileDialog, QHBoxLayout, QHeaderView, QLabel,
     QLineEdit, QMainWindow, QPlainTextEdit, QProgressBar, QPushButton,
     QToolButton, QTreeWidget, QTreeWidgetItem, QVBoxLayout, QWidget, QFrame, QStackedWidget,
 )
 from .ui_style import ArrowComboBox, ElidedLabel, EmptyState, short_path
+from .elearning_helper.assignments import AVAILABILITY_LABELS, COMPLETED, availability
 
-COMPLETED = {"submitted", "pending_review", "graded", "excused"}
 SUBMISSION_LABELS = {"unsubmitted": "未提交", "submitted": "已提交", "pending_review": "已提交，待评阅",
     "graded": "已评分", "excused": "免交", "unknown": "提交状态待确认", "no_online_submission": "无需在线提交"}
 
@@ -92,7 +92,8 @@ class ElearningPanel(QWidget):
         self.task_summary.setProperty("role", "muted")
         task_row.addWidget(self.task_summary, 1)
         self.task_filter = ArrowComboBox()
-        for label, value in [("当前待办", "pending"), ("全部作业", "all"), ("已提交 / 已完成", "completed")]:
+        for label, value in [("当前待办", "pending"), ("全部作业", "all"),
+                             ("已提交 / 已完成", "completed"), ("未开放 / 已关闭", "restricted")]:
             self.task_filter.addItem(label, value)
         self.task_filter.currentIndexChanged.connect(self.render_tasks)
         task_row.addWidget(self.task_filter)
@@ -101,6 +102,11 @@ class ElearningPanel(QWidget):
         self.refresh_button.clicked.connect(lambda: self.launch("check"))
         task_row.addWidget(self.refresh_button)
         layout.addLayout(task_row)
+        self.availability_hint = QLabel("尚未开放、已关闭或暂不可用的作业，在「全部作业」中单独折叠显示。")
+        self.availability_hint.setProperty("role", "muted")
+        self.availability_hint.setWordWrap(True)
+        self.availability_hint.hide()
+        layout.addWidget(self.availability_hint)
         self.task_tree = QTreeWidget()
         self.task_tree.setHeaderLabels(["课程 / 作业", "截止时间（北京时间）", "提交 / 开放状态", "官方入口"])
         self.task_tree.setAlternatingRowColors(True)
@@ -408,56 +414,116 @@ class ElearningPanel(QWidget):
 
     def render_tasks(self):
         self.task_tree.clear()
-        pending = completed = failures = 0
+        counts = Counter()
+        restricted = {state: [] for state in AVAILABILITY_LABELS}
         selection = self.task_filter.currentData()
         now = datetime.now(timezone.utc)
         for course in self.results:
             checked = course.get("assignments")
-            # Display filtering only: retain every assignment in results and the
-            # backend baseline so a later refresh can reveal unlocked work.
-            items = [item for item in checked.get("assignments", [])
-                     if not item.get("locked_for_user")] if checked else []
-            done = sum(item.get("submission") in COMPLETED for item in items)
-            todo = len(items) - done
-            pending += todo; completed += done
-            visible = [item for item in items if selection == "all" or
-                       (item.get("submission") in COMPLETED) == (selection == "completed")]
-            if checked and not visible:
-                continue
-            parent = QTreeWidgetItem(self.task_tree, [f"{course['course']}  ·  待办 {todo} / 已完成 {done}"])
-            font = parent.font(0); font.setBold(True); parent.setFont(0, font)
-            parent.setExpanded(True)
             if not checked:
-                failures += 1
+                counts["failures"] += 1
+                parent = self.assignment_group(self.task_tree, course["course"])
                 QTreeWidgetItem(parent, ["本次未能读取作业，请查看详细日志"])
                 continue
-            visible.sort(key=lambda item: (item.get("submission") in COMPLETED, item.get("due_at") or "9999", item.get("title", "")))
-            for item in visible:
-                submission = item.get("submission", "unknown")
-                label = SUBMISSION_LABELS.get(submission, "提交状态待确认")
-                overdue = False
-                try:
-                    overdue = submission == "unsubmitted" and bool(item.get("due_at")) and datetime.fromisoformat(item["due_at"].replace("Z", "+00:00")) < now
-                except (ValueError, TypeError):
-                    pass
-                if overdue:
-                    label += " · 已逾期"
-                child = QTreeWidgetItem(parent, [item["title"], due_text(item.get("due_at")), label, ""])
-                child.setToolTip(0, item["title"])
-                if item.get("unlock_at"):
-                    child.setToolTip(2, "接口开放时间：" + due_text(item["unlock_at"]))
-                if submission in COMPLETED:
-                    for column in range(3): child.setForeground(column, QColor("#777777"))
-                elif overdue:
-                    child.setForeground(2, QColor("#b45309"))
-                url = item.get("url", "")
-                if self.official_assignment_url(url):
-                    button = QPushButton("打开")
-                    button.setToolTip("在浏览器打开官方作业页面")
-                    button.clicked.connect(lambda _checked=False, target=url: self.open_assignment(target))
-                    self.task_tree.setItemWidget(child, 3, button)
-        self.task_summary.setText(f"{pending} 项待办 · {completed} 项已完成" + (f" · {failures} 门读取失败" if failures else ""))
+            items = checked.get("assignments", [])
+            current = []
+            groups = {state: [] for state in AVAILABILITY_LABELS}
+            for item in items:
+                state = availability(item, now)
+                done = item.get("submission") in COMPLETED
+                # Each assignment contributes to exactly one summary category.
+                counts["completed" if done else "pending" if state == "open" else state] += 1
+                if state == "open":
+                    current.append(item)
+                else:
+                    counts["restricted"] += 1
+                    if selection in {"all", "restricted"} or (selection == "completed" and done):
+                        groups[state].append(item)
+            for state, rows in groups.items():
+                if rows:
+                    restricted[state].append((course["course"], rows))
+            visible = [item for item in current if selection == "all" or
+                       (selection == "pending" and item.get("submission") not in COMPLETED) or
+                       (selection == "completed" and item.get("submission") in COMPLETED)]
+            if visible:
+                done = sum(item.get("submission") in COMPLETED for item in current)
+                parent = self.assignment_group(self.task_tree,
+                    f"{course['course']}  ·  待办 {len(current) - done} / 已完成 {done}")
+                self.add_assignments(parent, visible, "open", now)
+        # Restricted work has its own collapsed sections, never ordinary course rows.
+        for state, courses in restricted.items():
+            if not courses:
+                continue
+            total = sum(len(rows) for _, rows in courses)
+            section = self.assignment_group(self.task_tree,
+                f"{AVAILABILITY_LABELS[state]}  ·  {total} 项", expanded=selection == "restricted", muted=True)
+            for name, rows in courses:
+                parent = self.assignment_group(section, f"{name}  ·  {len(rows)} 项", muted=True)
+                self.add_assignments(parent, rows, state, now)
+        summary = [f"{counts['pending']} 项待办", f"{counts['completed']} 项已完成"]
+        for state, label in (("upcoming", "尚未开放"), ("closed", "已关闭未完成"), ("locked", "暂不可用")):
+            if counts[state]:
+                summary.append(f"{counts[state]} 项{label}")
+        if counts["failures"]:
+            summary.append(f"{counts['failures']} 门读取失败")
+        self.task_summary.setText(" · ".join(summary))
+        self.task_summary.setWordWrap(True)
+        self.availability_hint.setVisible(bool(counts["restricted"]))
         self.refresh_empty_state()
+
+    def assignment_group(self, parent, title, *, expanded=True, muted=False):
+        group = QTreeWidgetItem(parent, [title])
+        font = group.font(0)
+        font.setBold(True)
+        group.setFont(0, font)
+        if muted:
+            group.setForeground(0, self.assignment_muted_color())
+        group.setExpanded(expanded)
+        return group
+
+    def assignment_muted_color(self):
+        # The global QWidget stylesheet overrides palette text roles, so use
+        # the theme's explicit secondary color rather than PlaceholderText.
+        fallback = "#a4acb9" if self.palette().color(QPalette.ColorRole.Window).lightness() < 128 else "#697487"
+        return QColor(self.window().property("themeMuted") or fallback)
+
+    def add_assignments(self, parent, items, state, now):
+        for item in sorted(items, key=lambda item: (item.get("submission") in COMPLETED,
+                           item.get("due_at") or "9999", item.get("title", ""))):
+            submission = item.get("submission", "unknown")
+            label = SUBMISSION_LABELS.get(submission, "提交状态待确认")
+            overdue = False
+            try:
+                overdue = submission == "unsubmitted" and bool(item.get("due_at")) and datetime.fromisoformat(item["due_at"].replace("Z", "+00:00")) < now
+            except (ValueError, TypeError):
+                pass
+            if state != "open":
+                label += " · " + AVAILABILITY_LABELS[state]
+                date_key, date_label = ("unlock_at", "开放") if state == "upcoming" else ("lock_at", "关闭")
+                if state in {"upcoming", "closed"} and item.get(date_key):
+                    label += "\n" + due_text(item[date_key]) + " " + date_label
+            elif overdue:
+                label += " · 已逾期"
+            child = QTreeWidgetItem(parent, [item["title"], due_text(item.get("due_at")), label, ""])
+            child.setToolTip(0, item["title"])
+            details = []
+            for key, name in (("unlock_at", "接口开放时间"), ("lock_at", "接口关闭时间")):
+                if item.get(key):
+                    details.append(name + "：" + due_text(item[key]))
+            if state == "locked":
+                details.append("学校限制访问，未提供可确定的开放或关闭原因。")
+            child.setToolTip(2, "\n".join(details))
+            if state != "open" or submission in COMPLETED:
+                for column in range(3):
+                    child.setForeground(column, self.assignment_muted_color())
+            elif overdue:
+                child.setForeground(2, QColor("#b45309"))
+            url = item.get("url", "")
+            if self.official_assignment_url(url):
+                button = QPushButton("查看" if state != "open" else "打开")
+                button.setToolTip("在浏览器查看官方页面；访问范围由学校决定" if state != "open" else "在浏览器打开官方作业页面")
+                button.clicked.connect(lambda _checked=False, target=url: self.open_assignment(target))
+                self.task_tree.setItemWidget(child, 3, button)
 
     @staticmethod
     def official_assignment_url(url):

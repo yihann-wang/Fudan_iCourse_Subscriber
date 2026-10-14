@@ -1,5 +1,7 @@
 """Offline contract tests: both file-ASR models, OSS isolation and task recovery."""
 import json
+import errno
+import ssl
 import threading
 from dataclasses import replace
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -212,6 +214,149 @@ def test_query_and_result_outages_keep_original_submission(ali_server, tmp_path,
     assert '查询任务状态' in retries[0] and '取回识别结果' in retries[1]
 
 
+@pytest.mark.parametrize('failure', [
+    requests.exceptions.ProxyError(BrokenPipeError(errno.EPIPE, 'private-proxy')),
+    requests.exceptions.SSLError(ssl.SSLEOFError(ssl.SSL_ERROR_EOF, 'private-tls')),
+    requests.exceptions.ReadTimeout('private-upload-url'),
+])
+def test_upload_network_recovery_reopens_complete_audio(ali_server, tmp_path, monkeypatch, failure):
+    media, state, settings = setup(ali_server, tmp_path)
+    api = DashScopeAPI(replace(settings, retries=2))
+    ali_server['responses'] = [(200, policy(ali_server))] * 3 + [(200, {}),
+        (200, {'output': {'task_id': 'one-job'}}), (200, success(ali_server)), (200, transcript())]
+    post, close = api.session.post, api.session.close
+    attempts, reconnects, delays, notices, handles = [], [], [], [], []
+
+    def upload(url, **kwargs):
+        audio = kwargs['files']['file'][1]
+        assert not state.exists()  # No uncertain submission marker before uploading.
+        handles.append(audio)
+        attempts.append((kwargs['data']['key'], audio.tell(), audio.read()))
+        if len(attempts) <= 2:
+            raise failure
+        audio.seek(0)
+        return post(url, **kwargs)
+
+    def reconnect():
+        reconnects.append(True)
+        close()
+
+    monkeypatch.setattr(api.session, 'post', upload)
+    monkeypatch.setattr(api.session, 'close', reconnect)
+    monkeypatch.setattr('src.asr.dashscope.time.sleep', delays.append)
+    try:
+        assert api.transcribe(media, 3, task_path=state, progress=notices.append)['text']
+        assert len(reconnects) == 2
+    finally:
+        api.close()
+    assert delays == [30, 60] and all(h.closed for h in handles)
+    assert len({key for key, _, _ in attempts}) == 3
+    assert all(offset == 0 and body == media.read_bytes() for _, offset, body in attempts)
+    assert sum(c[1].endswith('/transcription') for c in ali_server['requests']) == 1
+    retries = [n['message'] for n in notices if n['event'] == 'retry']
+    assert len(retries) == 2 and all('重试上传音频' in n and '尚未提交' in n for n in retries)
+    assert all('private' not in n and settings.api_key not in n for n in retries)
+
+
+def test_lost_upload_response_uses_new_object_without_duplicate_asr(ali_server, tmp_path, monkeypatch):
+    media, state, settings = setup(ali_server, tmp_path)
+    api = DashScopeAPI(replace(settings, retries=1))
+    ali_server['responses'] = [(200, policy(ali_server)), (200, {}),
+        (200, policy(ali_server)), (200, {}), (200, {'output': {'task_id': 'only-job'}}),
+        (200, success(ali_server)), (200, transcript())]
+    post, objects = api.session.post, []
+
+    def upload(url, **kwargs):
+        objects.append(kwargs['data']['key'])
+        response = post(url, **kwargs)
+        if len(objects) == 1:
+            response.close()
+            raise requests.exceptions.ReadTimeout('server saved audio but response was lost')
+        return response
+
+    monkeypatch.setattr(api.session, 'post', upload)
+    monkeypatch.setattr('src.asr.dashscope.time.sleep', lambda _: None)
+    try:
+        assert api.transcribe(media, 3, task_path=state)['text']
+        assert api.transcribe(media, 3, task_path=state)['text']  # Cached result: no new calls.
+    finally:
+        api.close()
+    calls = ali_server['requests']
+    uploads = [c for c in calls if c[1] == '/oss']
+    assert len(uploads) == 2 and len(set(objects)) == 2 and len(calls) == 7
+    assert all(b'test-audio' in c[3] and c[2].get('Authorization') is None for c in uploads)
+    submissions = [c for c in calls if c[1].endswith('/transcription')]
+    assert len(submissions) == 1
+    assert json.loads(submissions[0][3])['input']['file_urls'] == ['oss://' + objects[-1]]
+
+
+@pytest.mark.parametrize('status', [408, 429, 500, 502, 503, 504])
+def test_transient_upload_http_error_recovers(ali_server, tmp_path, monkeypatch, status):
+    media, state, settings = setup(ali_server, tmp_path)
+    api = DashScopeAPI(replace(settings, retries=1))
+    ali_server['responses'] = [(200, policy(ali_server)), (status, {'message': settings.api_key}),
+        (200, policy(ali_server)), (200, {}), (200, {'output': {'task_id': 'one-job'}}),
+        (200, success(ali_server)), (200, transcript())]
+    delays, notices = [], []
+    monkeypatch.setattr('src.asr.dashscope.time.sleep', delays.append)
+    try:
+        assert api.transcribe(media, 3, task_path=state, progress=notices.append)['text']
+    finally:
+        api.close()
+    assert delays == [30] and len(ali_server['requests']) == 7
+    assert settings.api_key not in json.dumps(notices)
+
+
+@pytest.mark.parametrize('status', [400, 401, 403, 409, 413])
+def test_permanent_upload_error_is_not_retried(ali_server, tmp_path, monkeypatch, status):
+    media, state, settings = setup(ali_server, tmp_path)
+    api = DashScopeAPI(replace(settings, retries=2))
+    ali_server['responses'] = [(200, policy(ali_server)), (status, {})]
+    monkeypatch.setattr('src.asr.dashscope.time.sleep', lambda _: pytest.fail('Permanent failure must stop'))
+    try:
+        with pytest.raises(SpeechAPIError, match=f'上传音频 HTTP {status}'):
+            api.transcribe(media, 3, task_path=state)
+    finally:
+        api.close()
+    assert not state.exists() and len(ali_server['requests']) == 2
+
+
+@pytest.mark.parametrize('retries', [0, 2])
+def test_upload_retry_limit_leaves_no_uncertain_task(ali_server, tmp_path, monkeypatch, retries):
+    media, state, settings = setup(ali_server, tmp_path)
+    api = DashScopeAPI(replace(settings, retries=retries))
+    ali_server['responses'] = [(200, policy(ali_server))] * (retries + 1)
+    calls, delays = [], []
+
+    def fail(*args, **kwargs):
+        calls.append(True)
+        raise requests.exceptions.ProxyError(BrokenPipeError(errno.EPIPE, 'private-proxy'))
+
+    monkeypatch.setattr(api.session, 'post', fail)
+    monkeypatch.setattr('src.asr.dashscope.time.sleep', delays.append)
+    try:
+        with pytest.raises(SpeechAPIError, match='上传音频.*EPIPE.*尚未提交'):
+            api.transcribe(media, 3, task_path=state)
+    finally:
+        api.close()
+    assert len(calls) == retries + 1 and len(ali_server['requests']) == retries + 1
+    assert delays == ([30, 60] if retries else []) and not state.exists()
+
+
+def test_exhausted_upload_policy_is_not_retried_by_upload_loop(ali_server, tmp_path, monkeypatch):
+    media, state, settings = setup(ali_server, tmp_path)
+    api = DashScopeAPI(replace(settings, retries=2))
+    ali_server['responses'] = [(503, {})] * 3
+    delays = []
+    monkeypatch.setattr('src.asr.dashscope.time.sleep', delays.append)
+    try:
+        with pytest.raises(SpeechAPIError, match='获取上传凭证 HTTP 503'):
+            api.transcribe(media, 3, task_path=state)
+    finally:
+        api.close()
+    assert delays == [30, 60] and len(ali_server['requests']) == 3 and not state.exists()
+
+
 @pytest.mark.parametrize('error_type,label', [
     (requests.exceptions.ProxyError, '代理连接失败'),
     (requests.exceptions.SSLError, 'TLS 安全连接失败'),
@@ -246,6 +391,15 @@ def test_dns_and_os_error_codes_survive_redaction():
     reset = requests.exceptions.ConnectionError(ConnectionResetError(errno.ECONNRESET, 'private-url'))
     text = str(_network_failure(reset, '取回识别结果'))
     assert 'ECONNRESET' in text and '任务编号' in text and 'private' not in text
+
+
+@pytest.mark.parametrize('ssl_code', [ssl.SSL_ERROR_EOF, ssl.SSL_ERROR_SSL])
+def test_ssl_codes_never_become_os_error_names(ssl_code):
+    from src.asr.dashscope import _network_failure
+    error = requests.exceptions.SSLError(ssl.SSLError(ssl_code, 'private-url-and-password'))
+    text = str(_network_failure(error, '上传音频'))
+    expected = 'SSL_ERROR_EOF' if ssl_code == ssl.SSL_ERROR_EOF else 'SSL_ERROR_SSL'
+    assert expected in text and errno.errorcode[ssl_code] not in text and 'private' not in text
 
 
 def test_exhausted_policy_connections_do_not_claim_submitted_task(ali_server, tmp_path, monkeypatch):
@@ -289,12 +443,13 @@ def test_submission_connection_loss_remains_uncertain_without_retry(ali_server, 
     assert len(submissions) == 1
 
 
-def test_cancel_interrupts_retry_wait_without_submitting(ali_server, tmp_path):
+@pytest.mark.parametrize('phase', ['policy', 'upload'])
+def test_cancel_interrupts_retry_wait_without_submitting(ali_server, tmp_path, phase):
     import time
     from src.media import CancelledError
     media, state, settings = setup(ali_server, tmp_path)
     worker = CloudWorker(replace(settings, retries=2))
-    ali_server['responses'] = [(503, {})]
+    ali_server['responses'] = ([(200, policy(ali_server))] if phase == 'upload' else []) + [(503, {})]
     cancel = threading.Event()
     def progress(event):
         if event['event'] == 'retry':
@@ -306,14 +461,14 @@ def test_cancel_interrupts_retry_wait_without_submitting(ali_server, tmp_path):
     finally:
         worker.close()
     assert time.monotonic() - started < 10
-    assert not state.exists() and len(ali_server['requests']) == 1
+    assert not state.exists() and len(ali_server['requests']) == (2 if phase == 'upload' else 1)
 
 
 def test_worker_allows_combined_transport_and_polling_budget(tmp_path, monkeypatch):
     import io
     settings = ASRSettings(provider='dashscope', base_url=DASHSCOPE_BASE_URL, model='fun-asr')
     worker = CloudWorker(settings)
-    moments = iter([0, 1, 1400])  # Valid combined phases exceed the old 1305 s watchdog.
+    moments = iter([0, 1, 2500])  # Upload recovery can exceed the old 1695 s watchdog.
     monkeypatch.setattr('src.asr.client.time.monotonic', lambda: next(moments))
     monkeypatch.setattr(worker, '_start', lambda: None)
     monkeypatch.setattr(worker, 'close', lambda: None)

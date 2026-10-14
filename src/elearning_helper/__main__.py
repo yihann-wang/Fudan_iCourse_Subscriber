@@ -10,6 +10,7 @@ from zoneinfo import ZoneInfo
 
 from . import __version__
 from .api import CanvasClient, ConnectionFailure, LoginRequired
+from .assignments import AVAILABILITY_LABELS, availability
 from .config import load_config
 from .state import Store, run_lock
 from .sync import clean, run_sync
@@ -36,23 +37,34 @@ def display(results, tz):
             print("  错误：" + error)
         checked = result.get("assignments")
         if checked:
-            # Presentation only: JSON results, baseline and alert history stay complete.
-            visible = [item for item in checked["assignments"] if not item.get("locked_for_user")]
-            visible_ids = {item["id"] for item in visible}
-            events = [event for event in checked["alerts"] if event.get("id") in visible_ids]
-            print(f"  作业清单（{len(visible)} 项）" + ("（预览，不更新基线）" if checked["status"] == "preview" else ""))
-            for item in visible:
-                print(f"    {item['title']} | {due(item['due_at'], tz)} | {STATUS[item['submission']]}")
-                print("      " + item["url"])
+            items = checked["assignments"]
+            by_id = {item["id"]: item for item in items}
+            events = [event for event in checked["alerts"] if event.get("id") in by_id]
+            print(f"  作业清单（{len(items)} 项）" + ("（预览，不更新基线）" if checked["status"] == "preview" else ""))
+            for state, label in {"open": "当前可访问", **AVAILABILITY_LABELS}.items():
+                group = [item for item in items if availability(item) == state]
+                if not group:
+                    continue
+                print(f"  {label}（{len(group)} 项）")
+                for item in group:
+                    detail = "" if state == "open" else " | " + label
+                    if state == "upcoming":
+                        detail += " | 开放：" + due(item["unlock_at"], tz)
+                    elif state == "closed":
+                        detail += " | 关闭：" + due(item["lock_at"], tz)
+                    print(f"    {item['title']} | {due(item['due_at'], tz)} | {STATUS[item['submission']]}{detail}")
+                    print("      " + item["url"])
             if checked["first_run"]:
-                print("  首次建立基线；以上为当前可见作业，不逐条通知历史作业。")
+                print("  首次建立基线；以上为学校返回的作业，不逐条通知历史作业。")
             elif not events:
-                print("  本次可显示作业没有新增或截止时间变化。")
+                print("  本次作业没有新增或截止时间变化。")
             for event in events:
+                state = availability(by_id[event["id"]])
+                suffix = "" if state == "open" else "（" + AVAILABILITY_LABELS[state] + "）"
                 if event["kind"] == "new_assignment":
-                    print(f"  [新作业] {event['title']}：{due(event['due_at'], tz)}")
+                    print(f"  [新作业] {event['title']}{suffix}：{due(event['due_at'], tz)}")
                 elif event["kind"] == "deadline_changed":
-                    print(f"  [截止时间变更] {event['title']}：{due(event['old_due_at'], tz)} → {due(event['due_at'], tz)}")
+                    print(f"  [截止时间变更] {event['title']}{suffix}：{due(event['old_due_at'], tz)} → {due(event['due_at'], tz)}")
         for item in result["files"]:
             detail = item.get("reason") or item.get("path") or item.get("note") or ""
             if item["status"] in {"local_changed", "name_preserved"}:

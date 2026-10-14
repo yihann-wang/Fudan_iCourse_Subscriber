@@ -1,6 +1,7 @@
 """Future/locked assignments are visible metadata, independent of content access."""
 
 import json
+from datetime import datetime, timezone
 from urllib.parse import parse_qs, urlsplit
 from unittest.mock import Mock
 
@@ -8,6 +9,7 @@ import pytest
 
 from src.elearning_helper.__main__ import display
 from src.elearning_helper.api import CanvasClient, ConnectionFailure, pagination_next
+from src.elearning_helper.assignments import availability
 from src.elearning_helper.demo import DemoClient, DemoResponse, demo_config
 from src.elearning_helper.state import Store
 from src.elearning_helper.sync import check_assignments, normalize_assignment
@@ -33,7 +35,7 @@ def setup(tmp_path):
         store.close()
 
 
-def test_future_locked_metadata_is_retained_but_hidden_from_normal_output(setup, capsys):
+def test_locked_metadata_is_retained_and_separately_labelled_in_output(setup, capsys):
     config, course, store = setup
     client = DemoClient()
     client.assignment_rows = [future_assignment()]
@@ -45,11 +47,11 @@ def test_future_locked_metadata_is_retained_but_hidden_from_normal_output(setup,
     assert result["counts"] == {"received": 1, "listed": 1, "locked": 1, "unpublished": 0, "pages": None}
     display([{"course": course.name, "course_id": course.id, "errors": [], "files": [], "assignments": result}], "Asia/Shanghai")
     output = capsys.readouterr().out
-    assert "作业清单（0 项）" in output
-    assert "作业3" not in output and "2026-10-11 23:59" not in output
-    assert "内容尚不可访问" not in output and "2026-10-05 00:00" not in output
-    assert "无需在线提交" not in output and "未提交" not in output
-    assert "2026-12-25" not in output  # availability cutoff is not the due date
+    assert "作业清单（1 项）" in output
+    assert "作业3" in output and "2026-10-11 23:59" in output
+    assert "无需在线提交" in output
+    assert any(label in output for label in ("尚未开放", "已关闭", "暂不可用"))
+    assert result["assignments"][0]["lock_at"] == "2026-12-25T15:59:00+00:00"
     client.open.assert_not_called()
 
 
@@ -70,7 +72,7 @@ def test_locked_new_assignment_and_deadline_change_are_not_suppressed(setup):
     assert len(opened["assignments"]) == 2
 
 
-def test_normal_output_hides_locked_history_and_alerts_then_reveals_unlocked_metadata(setup, capsys):
+def test_normal_output_separates_locked_history_and_preserves_alerts(setup, capsys):
     config, course, store = setup
     client = DemoClient()
     check_assignments(client, store, config, course, dry_run=False)
@@ -83,8 +85,8 @@ def test_normal_output_hides_locked_history_and_alerts_then_reveals_unlocked_met
     result = {"course": course.name, "course_id": course.id, "errors": [], "files": [], "assignments": checked}
     display([result], "Asia/Shanghai")
     output = capsys.readouterr().out
-    assert "作业清单（1 项）" in output and "隐藏的锁定" not in output
-    assert "[新作业]" not in output and "内容尚不可访问" not in output
+    assert "作业清单（3 项）" in output and "隐藏的锁定待办" in output and "隐藏的锁定历史" in output
+    assert "[新作业]" in output and "当前可访问（1 项）" in output
     assert json.dumps(checked, ensure_ascii=False) == snapshot
     assert checked["counts"]["listed"] == 3 and checked["counts"]["locked"] == 2
     assert len(checked["alerts"]) == 2 and len(store.assignments(course.id)) == 3
@@ -95,6 +97,33 @@ def test_normal_output_hides_locked_history_and_alerts_then_reveals_unlocked_met
     display([result], "Asia/Shanghai")
     output = capsys.readouterr().out
     assert "作业清单（3 项）" in output and "隐藏的锁定待办" in output and "隐藏的锁定历史" in output
+    assert "当前可访问（3 项）" in output
+
+
+@pytest.mark.parametrize("changes,expected", [
+    ({"locked_for_user": False, "lock_at": "2020-01-01T00:00:00Z"}, "open"),
+    ({"due_at": "2020-01-01T00:00:00Z"}, "locked"),
+    ({"unlock_at": "2026-10-19T00:00:00+08:00"}, "upcoming"),
+    ({"unlock_at": "2026-10-14T00:00:00Z"}, "locked"),
+    ({"lock_at": "2026-10-14T00:00:00Z"}, "closed"),
+    ({"lock_at": "invalid", "unlock_at": "2026-10-19T00:00:00"}, "locked"),
+    ({"submission": "graded"}, "locked"),
+])
+def test_availability_uses_explicit_lock_and_aware_dates_never_due_or_submission(changes, expected):
+    now = datetime(2026, 10, 14, tzinfo=timezone.utc)
+    assert availability({"locked_for_user": True, **changes}, now) == expected
+
+
+def test_normalize_retains_effective_open_close_dates_without_replacing_due():
+    row = future_assignment()
+    row["lock_info"]["lock_at"] = "2026-10-12T00:00:00+08:00"
+    item = normalize_assignment(row, "115627", BASE)
+    assert item["unlock_at"] == "2026-10-04T16:00:00+00:00"
+    assert item["lock_at"] == "2026-10-11T16:00:00+00:00"
+    assert item["due_at"] == "2026-10-11T15:59:00+00:00"
+    row.update(lock_at="invalid", lock_info={"lock_at": "2026-10-12T00:00:00"})
+    item = normalize_assignment(row, "115627", BASE)
+    assert item["lock_at"] is None and item["due_at"] == "2026-10-11T15:59:00+00:00"
 
 
 @pytest.mark.parametrize("submission,expected", [(None, "unknown"), ({"workflow_state": "unsubmitted"}, "unsubmitted"),

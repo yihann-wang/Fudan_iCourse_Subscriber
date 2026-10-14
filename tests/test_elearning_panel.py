@@ -320,8 +320,8 @@ def test_failed_task_read_is_not_displayed_as_no_assignments(app):
     panel.close()
 
 
-@pytest.mark.parametrize("filter_index,visible_count", [(0, 2), (1, 3), (2, 1)])
-def test_locked_tasks_hidden_from_each_filter_and_counts_without_mutating_results(app, filter_index, visible_count):
+@pytest.mark.parametrize("filter_index,visible_count,restricted_count", [(0, 2, 0), (1, 3, 2), (2, 1, 1), (3, 0, 2)])
+def test_locked_tasks_have_separate_groups_and_counts_without_mutating_results(app, filter_index, visible_count, restricted_count):
     import copy
     payload = dashboard_fixture()
     items = payload["results"][0]["assignments"]["assignments"]
@@ -331,17 +331,26 @@ def test_locked_tasks_hidden_from_each_filter_and_counts_without_mutating_result
     panel = ElearningPanel()
     panel.task_filter.setCurrentIndex(filter_index)
     panel.apply_payload(payload)
-    assert panel.task_summary.text() == "2 项待办 · 1 项已完成"
-    course = panel.task_tree.topLevelItem(0)
-    assert course.text(0) == "Python程序设计  ·  待办 2 / 已完成 1"
-    assert course.childCount() == visible_count
-    assert all("锁定的" not in course.child(i).text(0) for i in range(course.childCount()))
+    assert panel.task_summary.text() == "2 项待办 · 2 项已完成 · 1 项暂不可用"
+    if visible_count:
+        course = panel.task_tree.topLevelItem(0)
+        assert course.text(0) == "Python程序设计  ·  待办 2 / 已完成 1"
+        assert course.childCount() == visible_count
+        assert all("锁定的" not in course.child(i).text(0) for i in range(course.childCount()))
+    if restricted_count:
+        group = panel.task_tree.topLevelItem(1 if visible_count else 0)
+        assert group.text(0) == f"暂不可用  ·  {restricted_count} 项"
+        assert group.isExpanded() == (filter_index == 3)
+        assert group.child(0).childCount() == restricted_count
+        assert "暂不可用" in group.child(0).child(0).text(2)
+        assert panel.task_tree.itemWidget(group.child(0).child(0), 3).text() == "查看"
+    assert panel.task_tree.topLevelItemCount() == bool(visible_count) + bool(restricted_count)
     assert payload == snapshot and len(panel.results[0]["assignments"]["assignments"]) == 5
     panel.close()
 
 
-@pytest.mark.parametrize("filter_index", [0, 1, 2])
-def test_courses_with_only_locked_or_no_assignments_have_no_empty_groups(app, filter_index):
+@pytest.mark.parametrize("filter_index", [0, 1, 2, 3])
+def test_courses_with_only_locked_assignments_are_separate_and_empty_courses_are_omitted(app, filter_index):
     import copy
     payload = dashboard_fixture()
     for item in payload["results"][0]["assignments"]["assignments"]:
@@ -353,8 +362,12 @@ def test_courses_with_only_locked_or_no_assignments_have_no_empty_groups(app, fi
     panel = ElearningPanel()
     panel.task_filter.setCurrentIndex(filter_index)
     panel.apply_payload(payload)
-    assert panel.task_tree.topLevelItemCount() == 0
-    assert panel.task_summary.text() == "0 项待办 · 0 项已完成"
+    assert panel.task_tree.topLevelItemCount() == (0 if filter_index == 0 else 1)
+    if filter_index:
+        group = panel.task_tree.topLevelItem(0)
+        assert "暂不可用" in group.text(0) and group.childCount() == 1
+        assert group.child(0).childCount() == (1 if filter_index == 2 else 3)
+    assert panel.task_summary.text() == "0 项待办 · 1 项已完成 · 2 项暂不可用"
     panel.close()
 
 
@@ -393,3 +406,65 @@ def test_unlock_refresh_reappears_and_keeps_baseline_and_deadline_alerts(app, tm
     finally:
         panel.close()
         store.close()
+
+
+def test_six_course_dashboard_keeps_all_21_assignments_but_only_two_current_todos(app):
+    payload = {"results": []}
+    def course(name, open_pending=0, completed=0, closed_completed=0, future=0):
+        items = []
+        for state, count, done in (("open", open_pending, False), ("open", completed, True),
+                                   ("closed", closed_completed, True), ("upcoming", future, False)):
+            for _ in range(count):
+                aid = str(len(items) + 1)
+                items.append({"id": aid, "title": name + "作业" + aid,
+                    "submission": "graded" if done else "unsubmitted", "locked_for_user": state != "open",
+                    "due_at": "2099-10-25T15:59:00Z", "unlock_at": "2099-10-18T16:00:00Z" if state == "upcoming" else None,
+                    "lock_at": "2020-10-01T15:59:00Z" if state == "closed" else None,
+                    "url": f"https://elearning.fudan.edu.cn/courses/1/assignments/{aid}"})
+        payload["results"].append({"course": name, "course_id": str(len(payload["results"]) + 1),
+            "errors": [], "files": [], "assignments": {"status": "checked", "assignments": items, "alerts": [], "first_run": False}})
+    course("云计算")
+    course("自然语言处理", closed_completed=3)
+    course("信息物理融合系统", open_pending=1)
+    course("算法", completed=2, closed_completed=2)
+    course("Python", completed=3, future=9)
+    course("计算机视觉", open_pending=1)
+    panel = ElearningPanel()
+    panel.apply_payload(payload)
+    assert panel.task_summary.text() == "2 项待办 · 10 项已完成 · 9 项尚未开放"
+    assert panel.task_tree.topLevelItemCount() == 2
+    assert "计算机视觉" in panel.task_tree.topLevelItem(1).text(0)
+    def leaves(parent):
+        return [leaf for i in range(parent.childCount()) for leaf in
+                (leaves(parent.child(i)) if parent.child(i).childCount() else [parent.child(i)])]
+    panel.task_filter.setCurrentIndex(1)
+    assert len(leaves(panel.task_tree.invisibleRootItem())) == 21
+    future_group = panel.task_tree.topLevelItem(4)
+    closed_group = panel.task_tree.topLevelItem(5)
+    assert future_group.text(0) == "尚未开放  ·  9 项" and not future_group.isExpanded()
+    assert closed_group.text(0) == "已关闭  ·  5 项" and not closed_group.isExpanded()
+    future_row = future_group.child(0).child(0)
+    assert future_row.text(1) == "2099-10-25 23:59"
+    assert "2099-10-19 00:00 开放" in future_row.text(2)
+    assert "已评分 · 已关闭" in closed_group.child(0).child(0).text(2)
+    panel.task_filter.setCurrentIndex(2)
+    assert len(leaves(panel.task_tree.invisibleRootItem())) == 10
+    panel.task_filter.setCurrentIndex(3)
+    assert len(leaves(panel.task_tree.invisibleRootItem())) == 14
+    assert all(panel.task_tree.topLevelItem(i).isExpanded() for i in range(2))
+    panel.close()
+
+
+def test_closed_unsubmitted_is_not_current_todo_or_completed(app):
+    payload = dashboard_fixture()
+    item = payload["results"][0]["assignments"]["assignments"][0]
+    item.update(locked_for_user=True, lock_at="2020-10-12T15:59:00Z")
+    panel = ElearningPanel()
+    panel.apply_payload(payload)
+    assert panel.task_summary.text() == "1 项待办 · 1 项已完成 · 1 项已关闭未完成"
+    assert panel.task_tree.topLevelItem(0).childCount() == 1
+    panel.task_filter.setCurrentIndex(1)
+    row = panel.task_tree.topLevelItem(1).child(0).child(0)
+    assert row.text(1) == "2020-10-11 23:59"
+    assert "未提交 · 已关闭" in row.text(2) and "2020-10-12 23:59 关闭" in row.text(2)
+    panel.close()

@@ -10,6 +10,7 @@ import json
 import math
 import re
 import socket
+import ssl
 import time
 from pathlib import Path
 from urllib.parse import urlsplit
@@ -23,19 +24,27 @@ from .cloud import SpeechAPIError, parse_response
 
 # Documented file-ASR outcomes, not model names or heuristic message matching.
 _EMPTY_RESULT_CODES = frozenset({"ASR_RESPONSE_HAVE_NO_WORDS", "SUCCESS_WITH_NO_VALID_FRAGMENT"})
+_RETRYABLE_HTTP_STATUSES = frozenset({408, 429, 500, 502, 503, 504})
+_SSL_ERROR_NAMES = {value: name for name, value in vars(ssl).items()
+                    if name.startswith("SSL_ERROR_") and isinstance(value, int)}
+_DNS_ERROR_NAMES = {value: name for name, value in vars(socket).items()
+                    if name.startswith("EAI_") and isinstance(value, int)}
 
 
 def retry_delay(attempt):
-    """Leave time for brief outages; only read-only requests use this backoff."""
+    """Back off safe reads and pre-submission uploads, never ASR submission."""
     return min(30 * 2 ** attempt, 60)
 
 
 def worker_timeout(settings):
     """Budget policy, upload, submit, polling and result retrieval separately."""
     request = 15 + min(60, settings.timeout_seconds)
-    read_budget = request * (settings.retries + 1) + sum(
-        retry_delay(i) for i in range(settings.retries))
-    return 3 * read_budget + (15 + settings.timeout_seconds) + request + settings.timeout_seconds + 60
+    attempts = settings.retries + 1
+    backoff = sum(retry_delay(i) for i in range(settings.retries))
+    read_budget = request * attempts + backoff
+    # Each upload attempt obtains a fresh policy, whose GET may itself retry.
+    upload_budget = attempts * (read_budget + 15 + settings.timeout_seconds) + backoff
+    return upload_budget + request + settings.timeout_seconds + 2 * read_budget + 60
 
 
 def _recovery_hint(phase):
@@ -58,7 +67,11 @@ def _network_failure(exc, phase):
             continue
         seen.add(id(item))
         dns = dns or isinstance(item, socket.gaierror)
-        code = errno.errorcode.get(getattr(item, "errno", None))
+        # SSL and resolver errors have their own numeric namespaces. In
+        # particular SSL_ERROR_EOF == 8 must never be displayed as ENOEXEC.
+        names = (_SSL_ERROR_NAMES if isinstance(item, ssl.SSLError) else
+                 _DNS_ERROR_NAMES if isinstance(item, socket.gaierror) else errno.errorcode)
+        code = names.get(getattr(item, "errno", None))
         if code and code not in codes:
             codes.append(code)
         pending.extend(value for value in (
@@ -193,6 +206,7 @@ def parse_dashscope_result(value, duration):
 class _HTTPFailure(SpeechAPIError):
     def __init__(self, status, phase="请求"):
         self.status = status
+        self.phase = phase
         detail = {400: "请核对模型和参数", 401: "API Key 无效或地域不匹配",
                   403: "无权访问，请核对模型开通状态、地域和余额",
                   404: "接口或云端任务不存在；旧任务可能已过期",
@@ -252,7 +266,7 @@ class DashScopeAPI:
                 try:
                     if response.status_code not in (200, 201, 202):
                         error = _HTTPFailure(response.status_code, phase)
-                        if response.status_code not in (408, 429, 500, 502, 503, 504):
+                        if response.status_code not in _RETRYABLE_HTTP_STATUSES:
                             raise error
                     else:
                         try:
@@ -303,6 +317,33 @@ class DashScopeAPI:
         return dict(message="阿里云连接成功，已取得所选模型的上传凭证；未上传音频、未提交转录。实际识别权限以任务结果为准。")
 
     def _upload(self, path, progress=None):
+        # Uploads only create temporary objects: no billable ASR task exists
+        # yet. A lost response may leave an unused object until its expiry.
+        # Use a fresh policy/key/file handle, never reuse the uncertain object
+        # or retry transcribe() as a whole (which could duplicate submission).
+        attempts = self.settings.retries + 1
+        for attempt in range(attempts):
+            try:
+                return self._upload_once(path, progress)
+            except _HTTPFailure as exc:
+                if exc.phase != "上传音频" or exc.status not in _RETRYABLE_HTTP_STATUSES:
+                    raise
+                error = exc
+            except requests.RequestException as exc:
+                error = _network_failure(exc, "上传音频")
+                if not isinstance(exc, (requests.ConnectionError, requests.Timeout,
+                                       requests.exceptions.ChunkedEncodingError)):
+                    raise error from None
+            if attempt + 1 == attempts:
+                raise error from None
+            self.session.close()  # Discard broken pooled proxy/TLS connections.
+            delay = retry_delay(attempt)
+            if progress:
+                progress(dict(event="retry", message=f"{error} {delay} 秒后重试上传音频"
+                              f"（{attempt + 1}/{self.settings.retries}）"))
+            time.sleep(delay)
+
+    def _upload_once(self, path, progress=None):
         if progress:
             progress(dict(event="progress", message="阿里云转录 · 正在获取上传凭证"))
         policy = self._policy(progress)
@@ -315,13 +356,10 @@ class DashScopeAPI:
                 "x-oss-forbid-overwrite": policy["x_oss_forbid_overwrite"], "success_action_status": "200"}
         if progress:
             progress(dict(event="progress", message="阿里云转录 · 正在上传音频"))
-        try:
-            with path.open("rb") as audio:
-                response = self.session.post(policy["upload_host"], data=form,
-                    files={"file": ("audio.mp3", audio, "audio/mpeg")},
-                    timeout=(15, self.settings.timeout_seconds), allow_redirects=False)
-        except requests.RequestException as exc:
-            raise _network_failure(exc, "上传音频") from None
+        with path.open("rb") as audio:
+            response = self.session.post(policy["upload_host"], data=form,
+                files={"file": ("audio.mp3", audio, "audio/mpeg")},
+                timeout=(15, self.settings.timeout_seconds), allow_redirects=False)
         try:
             if response.status_code not in (200, 201, 204):
                 raise _HTTPFailure(response.status_code, "上传音频")

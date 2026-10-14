@@ -383,10 +383,18 @@ def normalize_assignment(raw, cid, base):
                 openings.append(canonical_due(value))
             except ConnectionFailure:
                 pass  # Optional availability metadata must not hide the deadline.
+    closings = []
+    for value in (raw.get("lock_at"), lock_info.get("lock_at")):
+        if value:
+            try:
+                closings.append(canonical_due(value))
+            except ConnectionFailure:
+                pass
     return {"id": aid, "title": clean(raw.get("name") or "未命名作业"),
             "due_at": canonical_due(raw.get("due_at")),
             "url": f"{base}/courses/{cid}/assignments/{aid}", "submission": status,
-            "locked_for_user": locked, "unlock_at": max(openings) if openings else None}
+            "locked_for_user": locked, "unlock_at": max(openings) if openings else None,
+            "lock_at": min(closings) if closings else None}
 
 
 def check_assignments(client, store, config, course, *, dry_run):

@@ -144,6 +144,7 @@ def apply_theme(window, dark=None):
         palette.setColor(QPalette.ColorGroup.Disabled, role, QColor(disabled))
     window.setPalette(palette)
     window.setProperty('themeAccent', accent)
+    window.setProperty('themeMuted', muted)
     window.setStyleSheet(f'''
         QWidget {{ font-size: 13px; color: {fg}; }}
         QWidget#appRoot {{ background: {bg}; }}
